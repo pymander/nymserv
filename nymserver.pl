@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.16 2004/06/09 18:16:56 dybbuk Exp $
+# $Id: nymserver.pl,v 1.17 2004/06/09 18:19:22 dybbuk Exp $
 
 #
 # nymserv email pseudonym server
@@ -510,10 +510,18 @@ sub remail {
         open INDATA, $file;
         my @tmpbuff = <INDATA>;
         close INDATA;
-        my ($output, undef, undef) = 
+        my ($output, $err, $status) = 
           readwritegpg (join('', @tmpbuff), $inputfd, $stdoutfd, $stderrfd,
                         $statusfd);
         waitpid $pid, 0;
+
+        # If encryption is successful, $status should contain something like this:
+        #   [GNUPG:] BEGIN_ENCRYPTION 2 2
+        #   [GNUPG:] END_ENCRYPTION
+        if ($status !~ m/BEGIN_ENCRYPTION/ && $status !~ m/END_ENCRYPTION/) {
+            &fatal (0, "Encrypt/sign file failed -- public key problem:\n$status");
+        }
+        
         open(O, ">$ascfile") or die "$ascfile: $!\n";
         print O $output;
         close(O);
