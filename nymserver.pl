@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.7 2002/06/10 21:29:46 dybbuk Exp $
+# $Id: nymserver.pl,v 1.8 2002/06/12 13:55:14 dybbuk Exp $
 
 #
 # nymserv email pseudonym server
@@ -30,7 +30,12 @@ use strict;
 use POSIX qw(:errno_h :fcntl_h);
 use DB_File;
 use Socket;
+
+# Cryptographic modules.
 use Crypt::OpenPGP;
+use Crypt::OpenPGP::Constants qw( PGP_PKT_PUBLIC_KEY );
+
+# Digest and support modules.
 use Digest::MD5 qw(md5_base64);
 
 require "sys/syscall.ph";
@@ -191,7 +196,7 @@ sub catfile {
         close (F);
     }
     else {
-	die "$_[0]: $!";
+	&fatal(0, "$_[0]: Catfile error: $!");
     }
     $ret;
 }
@@ -373,21 +378,14 @@ sub find_recipient {
     # We will work our way through the keys in a public keyring until we
     # find one that doesn't match the nymserver's keyid.
     my $ring = Crypt::OpenPGP::KeyRing->new( Filename => $pubring )
-      or die "Ouch! " . Crypt::OpenPGP::KeyRing->errstr;
-    $ring->read;
-    my @blocks = $ring->blocks;
-    
-    foreach my $kb (@blocks) {
-        if (substr($kb->key->key_id_hex, -8, 8) eq $NYMKEYID) {
-            next;
-        } else {
-            return $kb->primary_uid;
-        }
-    }
+      or &fatal(0, "Unable to open $pubring: " . Crypt::OpenPGP::KeyRing->errstr);
 
-    return undef;
+    # This fast little replacement suggested by Benjamin Trott.
+    my $kb = $ring->find_keyblock(sub { substr($_[0]->key_id_hex, -8, 8) ne $NYMKEYID },
+                                  [ PGP_PKT_PUBLIC_KEY ] );
+    return $kb ? $kb->primary_uid : undef;
 }
-              
+
 sub remail {
     my ($file, $sign, $pubring, $rbfile, $fixedsz) = @_;
     my ($nrbused, $ascfile, $err) = (0);
