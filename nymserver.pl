@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.13 2004/04/26 12:51:35 lfousse Exp $
+# $Id: nymserver.pl,v 1.14 2004/06/09 01:06:02 dybbuk Exp $
 
 #
 # nymserv email pseudonym server
@@ -1885,7 +1885,7 @@ sub rundeliver {
     &clean;
     fatal (64, "Usage: nymserv -d recipient\n") unless (@ARGV == 1);
     fatal (67, "Invalid username\n")
-      unless ($ARGV[0] =~ /^(\w[\w-]{1,15})(\+[\w-]*)?$/);
+      unless ($ARGV[0] =~ /^(\w[\w-]{1,15})(\+[\w-]*)?(\@$HOSTNAME)?$/);
     my $recip = lc $1;
     my $plussed = $2;
 
