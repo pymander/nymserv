@@ -138,15 +138,26 @@ Use a transport by adding the following to etc/postfix/master.cf:
 # service type  private unpriv  chroot  wakeup  maxproc command + args
 #               (yes)   (yes)   (yes)   (never) (50)
 nymserver unix  -       n       n       -       -       pipe
-  flags=3DFR user=3Dnymserv argv=3D/usr/local/bin/nymserv -d $recipient
+  flags=FR user=nymserv argv=/usr/local/bin/nymserv -d $recipient
 
-Add the following to your transport table:
+Add the following to your transport table (for instance /etc/postfix/transport):
 
 nym.example.com		nymserver:
 
-Then, add this to your main.cf:
+Run postmap /etc/postfix/transport, and make sure you have
+
+transport_maps = hash:/etc/postfix/transport
+
+in your main.cf.  Then, add nym.example.com to your relay_domains setting
+in main.cf:
 
 relay_domains = ....... nym.example.com
+
+If you don't have a relay_domains setting yet, use the "postconf relay_domains"
+command to find out what the default is, then add this - with the addition
+of the nymserver domain - to main.cf.
+
+
 -------------------------------------------------------------------------------
 
 If your MTA is exim, you can follow these instructions :
