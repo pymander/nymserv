@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.9 2002/06/12 13:59:32 dybbuk Exp $
+# $Id: nymserver.pl,v 1.10 2002/12/31 15:28:10 dybbuk Exp $
 
 #
 # nymserv email pseudonym server
@@ -1045,33 +1045,54 @@ sub runconfig {
 	#system ("chflags nodump $QPREF.rb");
     }
     if ($pubkey) {
-        # Crypt::OpenPGP appears to be doing all of this correctly now.
-        # Let's see how it really works!  (Thanks to Ben Xain for the
-        # pointer)
         $pubring = "$QPREF.pgp";
         
         # This should hopefully be non-tainted, right?
         system('/bin/cp', $RINGPROTO, $pubring);
 
+        open(KEY, ">$QPREF.asc")
+          or die "$QPREF.asc: $!\n";
+        print KEY $pubkey;
+        close(KEY);
+        # Hairy GPG calling stuff.  Ugh.
+        my $gpgres = system($GPG, qw(--s2k-cipher-algo BLOWFISH
+                                     --no-default-keyring
+                                     --no-secmem-warning
+                                     --quiet --batch --no-tty),
+                            "--secret-keyring=$HOMEDIR/.gnupg/noring.gpg",
+                            "--homedir=$HOMEDIR/pgp",
+                            "--keyring=$pubring",
+                            '--import', "$QPREF.asc");
+
+        if ($gpgres != 0) {
+            &fatal(0,"$GPG exited with $gpgres\n");
+        }
+        chmod(0660, "$QPREF.pgp");
+
+        # Once Crypt::OpenPGP is working correctly, we will be able to
+        # use code similar to the stuff commented out below to manage
+        # and create our keyrings.  Until this time, we need to use
+        # the GnuPG calls above.
+        
         # Load our keyring into memory.
-        my ($tmpr, $newk);
-        $tmpr = new Crypt::OpenPGP::KeyRing (Filename => "$QPREF.pgp")
-          or die Crypt::OpenPGP::KeyRing->errstr;
-        $tmpr->read;
+        #my ($tmpr, $newk);
+        #$tmpr = new Crypt::OpenPGP::KeyRing (Filename => "$QPREF.pgp")
+        #  or die Crypt::OpenPGP::KeyRing->errstr;
+        #$tmpr->read;
 
         # This forces our ASCII armouring to be stripped away!
-        $newk = new Crypt::OpenPGP::KeyRing (Data => $pubkey)
-          or die Crypt::OpenPGP::KeyRing->errstr;
+        #$newk = new Crypt::OpenPGP::KeyRing (Data => $pubkey)
+        #  or die Crypt::OpenPGP::KeyRing->errstr;
 
         # There's only one key in there, so this snags it.  Right?
-        $tmpr->add($newk->find_keyblock_by_index(0));
+        #$tmpr->add($newk->find_keyblock_by_index(0));
         
-        open(QR, ">$QPREF.pgp") or
-          die "$QPREF.pgp: $!";
-        print QR $tmpr->save;
-        close(QR);
+        #open(QR, ">$QPREF.pgp") or
+        #  die "$QPREF.pgp: $!";
+        #print QR $tmpr->save;
+        #close(QR);
 
-        chmod(0600, "$QPREF.pgp");
+        #chmod(0600, "$QPREF.pgp");
         #system("cp $pubring /tmp");
     }
 
