@@ -50,17 +50,11 @@ commands similar to those below.
    cp pgp/pubring.pgp ring-proto.pgp
 
 Edit the configuration variables in the nymserver.pl script to set
-your machine name, domain names, and the paths to the needed
-binaries.  Make sure you've installed Crypt::OpenPGP and Digest::MD5.
-Both of these can be downloaded from CPAN (http://www.cpan.org/).
-
-Crypt::OpenPGP has a great number of prerequisites.  You will want to
-support as many different encryption algorithms as possible, so I
-would recommend installing all of them.  Crypt::IDEA is broken,
-however.  To fix it, you will need to edit IDEA.xs and change line 66
-so 'sv_undef' is 'PL_sv_undef'.  Math::Pari is another module to watch
-out for.  Make sure all the tests pass!  Remember, CPAN is your friend
-when it comes to installing Perl modules.
+your machine name, nymuser keyid (this must be the long keyid as given
+by "gpg --with-colons --list-key"), domain names, and the paths
+to the needed binaries. You will need the GnuPG::Interface and
+Digest::MD5 perl modules, which you can download at CPAN
+(http://www.cpan.org/).
 
 If you have an A record for your nymserver, set up finger support.
 Put a line like this in /etc/inetd.conf:
@@ -154,3 +148,41 @@ Then, add this to your main.cf:
 
 relay_domains = ....... nym.example.com
 -------------------------------------------------------------------------------
+
+If your MTA is exim, you can follow these instructions :
+
+1) make sure you accept mail for the nym domain, so put a line 
+
+ accept domains = nym.alias.net
+
+in your acl section.
+
+2) tell exim the nym domain is to be considered local and should not
+be catched by a dnslookup routeur.
+
+3) add a routeur for your nym domain :
+
+  nymserv:
+    debug_print = "R: nymserv for $local_part@$domain"
+    driver = accept
+    domains = +nymdomains
+    transport = nymserv_pipe
+    no_verify
+    no_expn
+
+Don't set any local_part_suffix as it would probably break alias used
+(remailer-key for example).
+
+4) add the nymserv_pipe transport :
+
+  nymserv_pipe:
+    debug_print = "T: nymserv_pipe for $local_part@$domain"
+    driver = pipe
+    user = nymserv
+    group = nymserv
+    path = "/bin:/usr/bin:/usr/local/bin"
+    command = "/var/lib/nymserv/nymserver.pl -d $local_part"
+    return_path_add
+    delivery_date_add
+    envelope_to_add
+
