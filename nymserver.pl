@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.4 2002/02/08 17:39:46 dybbuk Exp $
+# $Id: nymserver.pl,v 1.5 2002/06/07 22:02:40 dybbuk Exp $
 
 #
 # nymserv email pseudonym server
@@ -400,8 +400,14 @@ sub remail {
 	unlink ("$ascfile");
 
         $recipient = (&find_recipient($pubring) || '@');
-        
-        %cargs = (Compat  => 'GnuPG',
+
+        # We use PGP5 here because of certain compatability issues with
+        # PGP 6.5.8.  I'm sure this will never work with PGP 2.6.2
+        # again, unfortunately.
+        #
+        # A better solution may be to add a +pgp5 or +gpg option to the
+        # configuration.
+        %cargs = (Compat  => 'PGP5',
                   PubRing => $pubring);
         if ($sign) {
             $cargs{SecRing} = "$PGPPATH/secring.pgp";
@@ -2049,6 +2055,8 @@ my $flag = shift;
 if (!$flag) {
     &usage;
 } else {
+    # This continues to use GnuPG compatibility because we'll need to
+    # decrypt and verify all sorts of incoming goofiness.
     $PGP = new Crypt::OpenPGP (Compat  => 'GnuPG',
                                SecRing => "$PGPPATH/secring.pgp",
                                PubRing => "$PGPPATH/pubring.pgp");
