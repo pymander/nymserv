@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.6 2002/06/10 00:37:08 dybbuk Exp $
+# $Id: nymserver.pl,v 1.7 2002/06/10 21:29:46 dybbuk Exp $
 
 #
 # nymserv email pseudonym server
@@ -31,6 +31,7 @@ use POSIX qw(:errno_h :fcntl_h);
 use DB_File;
 use Socket;
 use Crypt::OpenPGP;
+use Digest::MD5 qw(md5_base64);
 
 require "sys/syscall.ph";
 
@@ -47,8 +48,6 @@ my $GPG      = '/usr/bin/gpg';  # Unfortunately still needed for some key manage
 my $SENDMAIL = '/usr/sbin/sendmail';
 my $QMAIL_CODES = 0; # Use qmail rather than sendmail exit codes
 my $REMAIL = '/home/erik/Mix/mix -SR';
-
-my $MD5 = '/usr/bin/md5sum'; # md5sum from GNU textutils
 
 # Specify your nymserver key ID right here.
 my $NYMKEYID = '798E65E7';
@@ -78,7 +77,8 @@ my $MAXLINES  = 1024;
 my $MSGPERDAY = 512;
 my $MSGSZUNIT = 32768;
 my $MSGSIZE   = 10240;
-my $SIGDAYS   = 7; # Number of days a digital signature is good for
+my $SIGDAYS   = 7 * 86400; # Number of seconds a digital signature is good
+                           # for.  We default to seven days.
 
 # Flags in user ".dat" file:
 my $FL_ENCRECV   = 0x1;
@@ -761,33 +761,22 @@ sub get_user {
     return ($user, $extra);
 }
 
-# Calculate some number that grows roughly as the number of days in a
-# given date.  This way we can make sure a signature was made at most
-# 6-8 days ago (since we will get leap years wrong).
-my @dom = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31);
-sub sumtime {
-    my ($y, $m, $d) = @_;
-    my $i;
-    $d += 365 * $y; 
-    for ($i = 0; $i < $m; $i++) {
-	$d += $dom[$i];
-    }
-    return ($d);
-}
-
 sub check_replay {
-    my ($file, $err) = @_;
+    my ($file, $sigday) = @_;
     my %rpc; # Replay cache
 
-    ($err =~ /^Signature made (\d{4})\/(\d{2})\/(\d{2}) /m) || return (-1);
-    my $sigday = &sumtime ($1 - 1900, $2 - 1, $3 + 0);
-    my $today = &sumtime ((gmtime)[5,4,3]);
+    # Unlike the old nymserver, we now keep track of this stuff in
+    # seconds since the epoch.
+    my $today = time;
     ($today >= $sigday + $SIGDAYS) && return (1);
-    ($sigday > $today + 1)
-	&& &fatal (65, "Invalid date on PGP signature\n");
+    ($sigday > $today + 86400)
+      && &fatal (65, "Invalid date on PGP signature\n");
 
-    my $sighash = `$MD5 $file`;
-    $sighash =~ s/ .*\n//;
+    # Calculate MD5 sum of our file.
+    open(MD5DAT, "<$file") or &fatal(0, "$file would not open: $!");
+    my $md5data = join('', <MD5DAT>);
+    close(MD5DAT);
+    my $sighash = md5_base64($md5data);
 
     tie_lock (%rpc, $REPLAY);
     if (defined ($rpc{$sighash})) {
@@ -797,7 +786,11 @@ sub check_replay {
     $msgmd5 = $rpc{$sighash};
     $rpc{$sighash} = $sigday;
     $rpc{'.clean'} = 0 unless (defined ($rpc{'.clean'}));
-    if ($today > $rpc{'.clean'}) {
+
+    # If it's been more than a day, we clean out our replay cache.  This
+    # can get really slow on systems with lots of message throughput.
+    # Maybe it would make a better cron job?
+    if (($today - 86400) > $rpc{'.clean'}) {
 	foreach (keys (%rpc)) {
 	    delete ($rpc{$_}) if ($today > $rpc{$_} + $SIGDAYS);
 	}
@@ -809,27 +802,30 @@ sub check_replay {
 
 sub check_sig {
     my ($pubring, $message) = @_;
-    my ($pgp, $err, $valid, $ptxt);
+    my ($pgp, $err, $valid, $ptxt, $intime, $sig);
 
-    ## SIGWORK
-    # Currently I can't seem to get signatures to be checked correctly.
-    # I'm not sure what's causing this.
+    # Signatures are correctly working now.
     $pgp = Crypt::OpenPGP->new (Compat  => 'GnuPG',
                                 PubRing => $pubring,
                                 SecRing => "$PGPPATH/secring.pgp")
-      or die Crypt::OpenPGP->errstr;
+      or &fatal(0, Crypt::OpenPGP->errstr . "\n");
 
-    ($ptxt, $valid) = $pgp->decrypt(Filename   => $message,
-                                    Passphrase => $PASSPHRASE)
-      or die $pgp->errstr;
+    ($ptxt, $valid, $sig) = $pgp->decrypt(Filename   => $message,
+                                          Passphrase => $PASSPHRASE)
+      or &fatal(0, $pgp->errstr . "\n");
 
     # Since our public key ring only has two keys in it, this should be
-    # safe to do.
-    if (defined $valid) {
+    # safe to do.  However, if we want to be safer we should check the
+    # user ID in the signature against the key ID we're looking for, and
+    # make sure they match.
+    if (defined $valid && $valid
+        && defined $sig) {
+        if (&check_replay($message, $sig->timestamp)) {
+            &fatal(0, "Discarding old or replayed message\n");
+        }
         return 1;
     } else {
         $_[2] = $pgp->errstr;
-        #return 0;
         return 0; # Until Crypt::OpenPGP works.
     }
     
