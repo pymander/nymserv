@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.14 2004/06/09 01:06:02 dybbuk Exp $
+# $Id: nymserver.pl,v 1.15 2004/06/09 18:13:31 dybbuk Exp $
 
 #
 # nymserv email pseudonym server
@@ -119,59 +119,59 @@ my $lockuser;           # User whose files are locked
 my $lockcount = 0;      # Number of times locked
 
 sub readwritegpg($$$$$) {
-	my ($in, $inputfd, $stdoutfd, $stderrfd, $statusfd) = @_;
-	local $/ = undef;
-	my $sout = IO::Select->new();
-	my $sin = IO::Select->new();
-	my $offset = 0;
+    my ($in, $inputfd, $stdoutfd, $stderrfd, $statusfd) = @_;
+    local $/ = undef;
+    my $sout = IO::Select->new();
+    my $sin = IO::Select->new();
+    my $offset = 0;
 
-	$inputfd->blocking(0);
-	$stdoutfd->blocking(0);
-	$statusfd->blocking(0);
-	$stderrfd->blocking(0);
-	$sout->add($stdoutfd);
-	$sout->add($stderrfd);
-	$sout->add($statusfd);
-	$sin->add($inputfd);
+    $inputfd->blocking(0);
+    $stdoutfd->blocking(0);
+    $statusfd->blocking(0);
+    $stderrfd->blocking(0);
+    $sout->add($stdoutfd);
+    $sout->add($stderrfd);
+    $sout->add($statusfd);
+    $sin->add($inputfd);
 
-	my ($stdout, $stderr, $status) = ("", "", "");
+    my ($stdout, $stderr, $status) = ("", "", "");
 
-	my ($readyr, $readyw, $written);
-	while ($sout->count() > 0) {
-		($readyr, $readyw, undef) = IO::Select::select($sout, $sin, undef, 42);
-		foreach my $wfd (@$readyw) {
-			$written = $wfd->syswrite($in, length($in) - $offset, $offset);
-			$offset += $written;
-			if ($offset == length($in)) {
-				close $wfd;
-				$sin->remove($wfd);
-				$sin = undef;
-			}
-		}
+    my ($readyr, $readyw, $written);
+    while ($sout->count() > 0) {
+        ($readyr, $readyw, undef) = IO::Select::select($sout, $sin, undef, 42);
+        foreach my $wfd (@$readyw) {
+            $written = $wfd->syswrite($in, length($in) - $offset, $offset);
+            $offset += $written;
+            if ($offset == length($in)) {
+                close $wfd;
+                $sin->remove($wfd);
+                $sin = undef;
+            }
+        }
 
-		next unless (defined(@$readyr)); # Wait some more.
+        next unless (defined(@$readyr)); # Wait some more.
 
-		for my $rfd (@$readyr) {
-			if ($rfd->eof) {
-				$sout->remove($rfd);
-				close($rfd);
-				next;
-			}
-			if ($rfd == $stdoutfd) {
-				$stdout .= <$rfd>;
-				next;
-			}
-			if ($rfd == $statusfd) {
-				$status .= <$rfd>;
-				next;
-			}
-			if ($rfd == $stderrfd) {
-				$stderr .= <$rfd>;
-				next;
-			}
-		}
-	}
-	return ($stdout, $stderr, $status);
+        for my $rfd (@$readyr) {
+            if ($rfd->eof) {
+                $sout->remove($rfd);
+                close($rfd);
+                next;
+            }
+            if ($rfd == $stdoutfd) {
+                $stdout .= <$rfd>;
+                next;
+            }
+            if ($rfd == $statusfd) {
+                $status .= <$rfd>;
+                next;
+            }
+            if ($rfd == $stderrfd) {
+                $stderr .= <$rfd>;
+                next;
+            }
+        }
+    }
+    return ($stdout, $stderr, $status);
 }
 
 sub fsync (\*) {
@@ -427,16 +427,17 @@ Content-type: message/partial; id=\"%s\"; number=%d; total=%d
 MIME-Version: 1.0
 
 EOF
+;
 
 sub mkfds() {
-        my %fds = (
-                stdin => IO::Handle->new(),
-                stdout => IO::Handle->new(),
-                stderr => IO::Handle->new(),
-                status => IO::Handle->new() );
-        my $handles = GnuPG::Handles->new( %fds );
-        return ($fds{'stdin'}, $fds{'stdout'}, $fds{'stderr'}, $fds{'status'}, $handles);
-};
+    my %fds = (
+        stdin => IO::Handle->new(),
+        stdout => IO::Handle->new(),
+        stderr => IO::Handle->new(),
+        status => IO::Handle->new() );
+    my $handles = GnuPG::Handles->new( %fds );
+    return ($fds{'stdin'}, $fds{'stdout'}, $fds{'stderr'}, $fds{'status'}, $handles);
+}
 
 sub find_recipient {
     my ($pubring) = @_;
@@ -448,14 +449,14 @@ sub find_recipient {
                                  homedir => $PGPPATH);
     my ($input, $output, $stderr, $status, $handles) = mkfds();
     $gnupg->list_public_keys(handles => $handles);
-	my ($outbuff, undef, undef) = readwritegpg ("", $input, $output, 
-												$stderr, $status);
-	my @outlines = split /\n/, $outbuff;
+    my ($outbuff, undef, undef) = readwritegpg ("", $input, $output, 
+                                                $stderr, $status);
+    my @outlines = split /\n/, $outbuff;
     foreach (@outlines) {
         next unless (/^pub/);
         my ($type, $trust, $length, $algo, $longkeyid, $created, $expires,
             $serial, $ownertrust, $uid, $sigclass, $caps, $issuer, $flag) = 
-             split /:/;
+              split /:/;
         return $longkeyid unless ($longkeyid eq $NYMKEYID);
     }
 }
@@ -485,15 +486,15 @@ sub remail {
                                   homedir => $PGPPATH,
                                   always_trust => 1,
                                   extra_args => 
-                                             [ '--no-default-keyring',
-                                               '--no-permission-warning',
-                                               '--no-tty',
-                                               '--batch',
-                                               '--keyring', $pubring,
-                                               '--keyring',
-                                               "$PGPPATH/pubring.pgp",
-                                               '--secret-keyring', 
-                                               "$PGPPATH/secring.pgp" ]);
+                                    [ '--no-default-keyring',
+                                      '--no-permission-warning',
+                                      '--no-tty',
+                                      '--batch',
+                                      '--keyring', $pubring,
+                                      '--keyring',
+                                      "$PGPPATH/pubring.pgp",
+                                      '--secret-keyring', 
+                                      "$PGPPATH/secring.pgp" ]);
         my ($inputfd, $stdoutfd, $stderrfd, $statusfd, $handles) = mkfds();
         my $pid;
         $gpg->options->push_recipients($recipient);
@@ -509,9 +510,9 @@ sub remail {
         open INDATA, $file;
         my @tmpbuff = <INDATA>;
         close INDATA;
-		my ($output, undef, undef) = 
-		 readwritegpg (join('', @tmpbuff), $inputfd, $stdoutfd, $stderrfd,
-					   $statusfd);
+        my ($output, undef, undef) = 
+          readwritegpg (join('', @tmpbuff), $inputfd, $stdoutfd, $stderrfd,
+                        $statusfd);
         waitpid $pid, 0;
         open(O, ">$ascfile") or die "$ascfile: $!\n";
         print O $output;
@@ -649,7 +650,9 @@ sub decrypt_stdin {
     my ($ptdata, $sig, $encdata);
     
     open (I, ">$QPREF.i") || &fatal (71, "Error creating queue file ($!).\n");
-    while (<STDIN>) { last if /^-----BEGIN PGP MESSAGE-----\s*$/; }
+    while (<STDIN>) {
+        last if /^-----BEGIN PGP MESSAGE-----\s*$/;
+    }
     while ($_) {
 	&fatal (71, "Error writing queue file ($!).\n") unless print I $_;
 	last if (/^-----END PGP MESSAGE-----\s*$/ || ! ($_ = <STDIN>));
@@ -672,9 +675,9 @@ sub decrypt_stdin {
     open CDATA, "$QPREF.i";
     my @encdata = <CDATA>;
     close CDATA;
-	my ($output, $err, $status) = 
-		readwritegpg (join('', @encdata), $inputfd, $outputfd, $stderrfd,
-					  $statusfd);
+    my ($output, $err, $status) = 
+      readwritegpg (join('', @encdata), $inputfd, $outputfd, $stderrfd,
+                    $statusfd);
     waitpid $pid, 0;
     if (defined $output) {
         open(O, ">$QPREF.m") || &fatal(71, "Error creating queue file $QPREF.m ($!).\n");
@@ -926,11 +929,11 @@ sub check_sig {
     open MSG, $message;
     my @tmpbuf = <MSG>;
     close MSG;
-	my ($output, $err, $status) = 
-		readwritegpg (join('', @tmpbuf), $inputfd, $outputfd, $stderrfd,
-					  $statusfd);
+    my ($output, $err, $status) = 
+      readwritegpg (join('', @tmpbuf), $inputfd, $outputfd, $stderrfd,
+                    $statusfd);
     waitpid $pid, 0;
-	my @statusbuf = split /\n/, $status;
+    my @statusbuf = split /\n/, $status;
     $valid = grep (/GOODSIG/, @statusbuf);
     my ($tstamp) = grep (/VALIDSIG/, @statusbuf);
     $tstamp = (split / /, $tstamp)[4];
@@ -948,14 +951,14 @@ sub check_sig {
     # user ID in the signature against the key ID we're looking for, and
     # make sure they match.
     if (defined $valid && $valid
-        && defined $tstamp) {
+          && defined $tstamp) {
         if (&check_replay($message, $tstamp)) {
             &fatal(0, "Discarding old or replayed message\n");
         }
         return 1;
     } else {
         $_[2] = "Invalid signature";
-        return 0; # Until Crypt::OpenPGP works.
+        return 0;               # Until Crypt::OpenPGP works.
     }
     
 }
@@ -1189,20 +1192,20 @@ sub runconfig {
         my ($key, $block, $ring);
         my ($inputfd, $outputfd, $stderrfd, $statusfd, $handles) = mkfds();
         $gpg->options->hash_init ( extra_args => [ '--no-default-keyring',
-                                              '--no-permission-warning',
-                                              '--no-secmem-warning',
-                                              '--no-tty',
-                                              '--batch',
-                                              '--keyring', 
-                                              $pubring,
-                                              '--homedir',
-                                              $PGPPATH ]);
+                                                   '--no-permission-warning',
+                                                   '--no-secmem-warning',
+                                                   '--no-tty',
+                                                   '--batch',
+                                                   '--keyring', 
+                                                   $pubring,
+                                                   '--homedir',
+                                                   $PGPPATH ]);
         my $pid = $gpg->wrap_call (handles => $handles,
                                    commands => [ '--import' ],
                                    command_args => [ "$QPREF.asc" ]);
-		my (undef, undef, $status) = 
-			readwritegpg ("", $inputfd, $outputfd, $stderrfd,
-						  $statusfd);
+        my (undef, undef, $status) = 
+          readwritegpg ("", $inputfd, $outputfd, $stderrfd,
+                        $statusfd);
         my $gpgres = grep(/IMPORT_OK/, $status);
         waitpid $pid, 0;
         if ($gpgres != 1) {
@@ -1359,11 +1362,9 @@ not be performed.  The following error(s) were encountered:
 
 %s
 EOF
-			     $user ? "$user\@$HOSTNAME"
-			     : "UNKNOWN ALIAS",
+			     $user ? "$user\@$HOSTNAME" : "UNKNOWN ALIAS",
 			     $authorized ? "" : " (unauthentic)",
-			     $user ? "alias <$user\@$HOSTNAME>"
-			     : "an unspecified alias", $err);
+			     $user ? "alias <$user\@$HOSTNAME>" : "an unspecified alias", $err);
 	if ($authorized && !$rbfile) {
 	    &sendtouser ($user, $file);
 	}
@@ -1690,7 +1691,7 @@ EOF
                                                   '--keyring',
                                                   "$PGPPATH/pubring.pgp",
                                                   '--secret-keyring', 
-                                                   "$PGPPATH/secring.pgp" ]);
+                                                  "$PGPPATH/secring.pgp" ]);
         my ($inputfd, $stdoutfd, $stderrfd, $statusfd, $handles) = mkfds();
         $gpg->options->meta_signing_key_id($NYMKEYID);
         $gpg->passphrase($PASSPHRASE);
@@ -1699,9 +1700,9 @@ EOF
         open TOSIGN, "$QPREF.b";
         my @datats = <TOSIGN>;
         close TOSIGN;
-		my ($output, $err, $status) =
-			readwritegpg(join('', @datats), $inputfd, $stdoutfd, $stderrfd,
-						 $statusfd);
+        my ($output, $err, $status) =
+          readwritegpg(join('', @datats), $inputfd, $stdoutfd, $stderrfd,
+                       $statusfd);
         waitpid $pid, 0;
         open(SB, ">$QPREF.b.asc")
           or &fatal(78, "Could not create PGP signature.\n$!");
