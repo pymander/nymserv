@@ -1,0 +1,135 @@
+Some extremely brief instructions on setting up a nym.alias.net style
+nym server.  This assumes you already know about remailers and DNS,
+and sendmail, and have already setup the appropriate DNS records
+(either A or MX) to receive mail at a "nym" domain name on your
+machine.
+
+Make sure you have perl5.003 or later, installed with the DB_File
+module.  Don't forget to run h2ph when installing perl (cd
+/usr/include; h2ph *.h sys/*.h).  If you don't have DB_File, get db
+from ftp.cs.berkeley.edu:/ucb/4bsd/db.1.85.tar.gz, install it, and
+then reinstall perl so that the DB_File module is available.
+
+Make sure you also have a type 1 remailer running.  By default, the
+type1 remailer executable is assumed to be at /usr/remail/remailer.
+If you are using the ghio2 remailer, you will need to add the
+following lines at the start of the main procedure (also make sure you
+define PGPPATH as it will be needed for access to the randseed.bin
+file):
+
+  int lockfd;
+
+  umask (007);
+  lockfd = open (DIR "/lock", O_CREAT|O_WRONLY, 0777);
+  flock (lockfd, LOCK_EX);
+#ifdef PGPPATH
+  strcpy(input,"PGPPATH=");
+  strcat(input,PGPPATH);
+  putenv(input);
+#endif
+
+Create a new userid/groupid under which to run the nym.  Call it
+nymuser.
+
+Create a directory for your nym server to reside in, for example
+/usr/nym.  Copy the nymserv perl script into /usr/nym, and make three
+subdirectories of /usr/nym:  pgp, queue, and users.  Make sure pgp,
+queue, and users are writeable by user nymuser.
+
+Create a PGP key for your nymserver as follows:
+
+   setenv PGPPATH /usr/nym/pgp
+   pgp -kg
+
+Put the corresponding PGP passphrase in the file pgp/passphrase.
+
+Create files /usr/nym/users/postmaster.forward and
+/usr/nym/users/admin.forward which contain your real E-mail address.
+Create a file users/remailer-key.reply which contains the PGP public
+key you just created.  Create a ring prototype file.
+
+   echo 'From: nobody@nym.alias.net' > users/remailer-key.reply
+   echo 'Subject: PGP key for nym.alias.net' >> users/remailer-key.reply
+   echo '' >> users/remailer-key.reply
+   pgp +pubring=pgp/pubring.pgp -fkxa >> users/remailer-key.reply
+
+   cp pgp/pubring.pgp ring-proto.pgp
+
+Edit the first few lines of the nymserv executable to set your machine
+name and domain name of your nym server.  Make sure you also have
+md5sum (if not, get textutils from prep.ai.mit.edu:/pub/gnu).
+
+If you have an A record for your nymserver, set up finger support.
+Put a line like this in /etc/inetd.conf:
+
+finger	stream	tcp	nowait	nymuser	/usr/nym/nymserv nymserv -fingerd
+
+Finally, make a new sendmail.cf file which sends all mail to the nym
+domain name through the nymserver.  What follows is an example ".mc"
+file suitable for use with sendmail 8.7.5.
+
+-------------------------------------------------------------------------------
+divert(-1)
+
+# Example sendmail configuration for a nymserver
+
+include(`../m4/cf.m4')
+
+dnl
+dnl  Set your Operating system type below
+dnl
+OSTYPE(solaris2)dnl
+
+dnl
+dnl  These flags are necessary to encure privacy (and to prevent nym
+dnl  from lines from being rewritten with names of actual users in the
+dnl  password file):
+dnl
+define(`confPRIVACY_FLAGS',
+	`novrfy,noexpn,noreceipts,restrictmailq,restrictqrun')dnl
+define(`confFROM_HEADER', `$g')dnl
+define(`confLOG_LEVEL', `1')dnl
+define(`confTO_IDENT', `0s')dnl
+define(`HReceived', `H?R?Received')dnl
+
+dnl
+dnl  Recommended:
+dnl
+define(`confMIME_FORMAT_ERRORS', `False')dnl
+
+dnl
+dnl  Uncomment the following line if you want procmail used for local
+dnl  mail:
+dnl
+dnl  FEATURE(local_procmail)
+
+PUSHDIVERT(7)dnl
+
+######################################
+###   alias mailer specification   ###
+######################################
+
+dnl
+dnl  Note here that 8888 should be changed to the user ID of the nym
+dnl  user, and 9999 should be changed to the group ID of that user.
+dnl
+Mnym,		P=/usr/nym/nymserv, F=DFMehluS, L=255, T=X-Unix,
+		U=8888 9999, S=10/30, R=20/40,
+		A=nymserv -d $u
+
+POPDIVERT`'dnl
+
+MAILER(local)dnl
+MAILER(smtp)dnl
+
+LOCAL_RULE_0
+
+dnl
+dnl  Replace nym.alias.net with the actual name of your nymserver.
+dnl
+# Redirect the alias mail to the alias mailer
+R$+<@nym.alias.net.>	$#nym $: $1
+-------------------------------------------------------------------------------
+
+And here is the nymserv perl script:
+
