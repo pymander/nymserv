@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.12 2004/04/07 13:30:42 lfousse Exp $
+# $Id: nymserver.pl,v 1.13 2004/04/26 12:51:35 lfousse Exp $
 
 #
 # nymserv email pseudonym server
@@ -32,6 +32,7 @@ use DB_File;
 use Socket;
 use Fcntl ':flock';
 use IO::Handle;
+use IO::Select;
 
 # Cryptographic module.
 use GnuPG::Interface;
@@ -116,6 +117,62 @@ my $pgppid;             # Process ID of child PGP process
 
 my $lockuser;           # User whose files are locked
 my $lockcount = 0;      # Number of times locked
+
+sub readwritegpg($$$$$) {
+	my ($in, $inputfd, $stdoutfd, $stderrfd, $statusfd) = @_;
+	local $/ = undef;
+	my $sout = IO::Select->new();
+	my $sin = IO::Select->new();
+	my $offset = 0;
+
+	$inputfd->blocking(0);
+	$stdoutfd->blocking(0);
+	$statusfd->blocking(0);
+	$stderrfd->blocking(0);
+	$sout->add($stdoutfd);
+	$sout->add($stderrfd);
+	$sout->add($statusfd);
+	$sin->add($inputfd);
+
+	my ($stdout, $stderr, $status) = ("", "", "");
+
+	my ($readyr, $readyw, $written);
+	while ($sout->count() > 0) {
+		($readyr, $readyw, undef) = IO::Select::select($sout, $sin, undef, 42);
+		foreach my $wfd (@$readyw) {
+			$written = $wfd->syswrite($in, length($in) - $offset, $offset);
+			$offset += $written;
+			if ($offset == length($in)) {
+				close $wfd;
+				$sin->remove($wfd);
+				$sin = undef;
+			}
+		}
+
+		next unless (defined(@$readyr)); # Wait some more.
+
+		for my $rfd (@$readyr) {
+			if ($rfd->eof) {
+				$sout->remove($rfd);
+				close($rfd);
+				next;
+			}
+			if ($rfd == $stdoutfd) {
+				$stdout .= <$rfd>;
+				next;
+			}
+			if ($rfd == $statusfd) {
+				$status .= <$rfd>;
+				next;
+			}
+			if ($rfd == $stderrfd) {
+				$stderr .= <$rfd>;
+				next;
+			}
+		}
+	}
+	return ($stdout, $stderr, $status);
+}
 
 sub fsync (\*) {
     my ($f) = @_;
@@ -389,9 +446,12 @@ sub find_recipient {
                                                  '--fixed-list-mode',
                                                  '--keyring', $pubring ],
                                  homedir => $PGPPATH);
-    my ($intput, $output, $stderr, $status, $handles) = mkfds();
+    my ($input, $output, $stderr, $status, $handles) = mkfds();
     $gnupg->list_public_keys(handles => $handles);
-    while (<$output>) {
+	my ($outbuff, undef, undef) = readwritegpg ("", $input, $output, 
+												$stderr, $status);
+	my @outlines = split /\n/, $outbuff;
+    foreach (@outlines) {
         next unless (/^pub/);
         my ($type, $trust, $length, $algo, $longkeyid, $created, $expires,
             $serial, $ownertrust, $uid, $sigclass, $caps, $issuer, $flag) = 
@@ -449,17 +509,12 @@ sub remail {
         open INDATA, $file;
         my @tmpbuff = <INDATA>;
         close INDATA;
-        print $inputfd @tmpbuff;
-        close $inputfd;
-        @tmpbuff = <$stdoutfd>;
-        close $stdoutfd;
-        my @errorbuf = <$stderrfd>;
-        close $stderrfd;
-        my @statusbuf = <$statusfd>;
-        close $statusfd;
+		my ($output, undef, undef) = 
+		 readwritegpg (join('', @tmpbuff), $inputfd, $stdoutfd, $stderrfd,
+					   $statusfd);
         waitpid $pid, 0;
         open(O, ">$ascfile") or die "$ascfile: $!\n";
-        print O @tmpbuff;
+        print O $output;
         close(O);
     } else {
 	$ascfile = "$file";
@@ -591,7 +646,6 @@ sub sendtouser {
 }
 
 sub decrypt_stdin {
-    my $err;
     my ($ptdata, $sig, $encdata);
     
     open (I, ">$QPREF.i") || &fatal (71, "Error creating queue file ($!).\n");
@@ -612,29 +666,23 @@ sub decrypt_stdin {
                                                "$PGPPATH/pubring.pgp",
                                                '--secret-keyring', 
                                                "$PGPPATH/secring.pgp"]);
-    my ($input, $output, $stderr, $status, $handles) = mkfds();
+    my ($inputfd, $outputfd, $stderrfd, $statusfd, $handles) = mkfds();
     $gpg->passphrase($PASSPHRASE);
     my $pid = $gpg->decrypt(handles => $handles);
     open CDATA, "$QPREF.i";
     my @encdata = <CDATA>;
     close CDATA;
-    print $input @encdata;
-    close $input;
-    my @decdata = <$output>;
-    close $output;
-    my @status_data = <$status>;
-    my @error_data = <$stderr>;
-    close $status;
-    close $stderr;
+	my ($output, $err, $status) = 
+		readwritegpg (join('', @encdata), $inputfd, $outputfd, $stderrfd,
+					  $statusfd);
     waitpid $pid, 0;
-    $ptdata = join('', @decdata);
-    if (defined $ptdata) {
+    if (defined $output) {
         open(O, ">$QPREF.m") || &fatal(71, "Error creating queue file $QPREF.m ($!).\n");
-        print O $ptdata;
+        print O $output;
         close(O);
     } else {
         &fatal(66, sprintf("Could not decrypt message: %s",
-                           <$status>));
+                           $status));
     }
 }
 
@@ -860,7 +908,7 @@ sub check_replay {
 
 sub check_sig {
     my ($pubring, $message) = @_;
-    my ($pgp, $err, $valid, $ptxt, $intime, $sig);
+    my ($pgp, $valid, $ptxt, $intime, $sig);
 
     # Signatures are correctly working now.
     $pgp = GnuPG::Interface->new();
@@ -872,24 +920,28 @@ sub check_sig {
                                                '--batch',
                                                '--secret-keyring', 
                                                "$PGPPATH/secring.pgp"]);
-    my ($input, $output, $stderr, $status, $handles) = mkfds();
+    my ($inputfd, $outputfd, $stderrfd, $statusfd, $handles) = mkfds();
     $pgp->passphrase($PASSPHRASE);
     my $pid = $pgp->decrypt(handles => $handles);
     open MSG, $message;
     my @tmpbuf = <MSG>;
     close MSG;
-    print $input @tmpbuf;
-    close $input;
-    my @outputbuf = <$output>;
-    close $output;
-    my @statusbuf = <$status>;
-    close $status;
-    my @errorbuf = <$stderr>;
-    close $stderr;
+	my ($output, $err, $status) = 
+		readwritegpg (join('', @tmpbuf), $inputfd, $outputfd, $stderrfd,
+					  $statusfd);
+    waitpid $pid, 0;
+	my @statusbuf = split /\n/, $status;
     $valid = grep (/GOODSIG/, @statusbuf);
     my ($tstamp) = grep (/VALIDSIG/, @statusbuf);
     $tstamp = (split / /, $tstamp)[4];
-    waitpid $pid, 0;
+
+    my $logline = "<checksig time=" . time . ">\n";
+    $logline .= " <input>\n" . join('', @tmpbuf) . " </input>\n";
+    $logline .= " <output>\n" . $output . " </output>\n";
+    $logline .= " <status>\n" . $status . " </status>\n";
+    $logline .= " <error>\n" . $err . " </error>\n";
+    $logline .= "</checksig>";
+    logthis($logline);
 
     # Since our public key ring only has two keys in it, this should be
     # safe to do.  However, if we want to be safer we should check the
@@ -1135,7 +1187,7 @@ sub runconfig {
         close(KEY);
         my $gpg = GnuPG::Interface->new();
         my ($key, $block, $ring);
-        my ($input, $output, $stderr, $status, $handles) = mkfds();
+        my ($inputfd, $outputfd, $stderrfd, $statusfd, $handles) = mkfds();
         $gpg->options->hash_init ( extra_args => [ '--no-default-keyring',
                                               '--no-permission-warning',
                                               '--no-secmem-warning',
@@ -1148,14 +1200,10 @@ sub runconfig {
         my $pid = $gpg->wrap_call (handles => $handles,
                                    commands => [ '--import' ],
                                    command_args => [ "$QPREF.asc" ]);
-        close $input;
-        my @tmpbuff = <$output>;
-        close $output;
-        @tmpbuff = <$stderr>;
-        close $stderr;
-        @tmpbuff = <$status>;
-        close $status;
-        my $gpgres = grep(/IMPORT_OK/, @tmpbuff);
+		my (undef, undef, $status) = 
+			readwritegpg ("", $inputfd, $outputfd, $stderrfd,
+						  $statusfd);
+        my $gpgres = grep(/IMPORT_OK/, $status);
         waitpid $pid, 0;
         if ($gpgres != 1) {
             &fatal(0,"GnuPG could not import key.\n");
@@ -1628,7 +1676,6 @@ EOF
     my $result;
     my @recips;
 
-    my $err;
     if (!$notmailed && ($flags & $FL_SIGSEND) && $hasbody) {
         # Ok, this is now working.  Clearsigning makes sure that it's
         # actually readable at the destination, which is ganz toll,
@@ -1652,19 +1699,13 @@ EOF
         open TOSIGN, "$QPREF.b";
         my @datats = <TOSIGN>;
         close TOSIGN;
-        print $inputfd @datats;
-        close $inputfd;
-        my @signedout = <$stdoutfd>;
-        close $stdoutfd;
-        my @errorbuf = <$stderrfd>;
-        close $stderrfd;
-        my @statusbuff = <$statusfd>;
-        close $statusfd;
+		my ($output, $err, $status) =
+			readwritegpg(join('', @datats), $inputfd, $stdoutfd, $stderrfd,
+						 $statusfd);
         waitpid $pid, 0;
-        my $signed = join('', @signedout);
         open(SB, ">$QPREF.b.asc")
           or &fatal(78, "Could not create PGP signature.\n$!");
-        print SB $signed;
+        print SB $output;
         close(SB);
 # 	&fatal (78, "Could not create PGP signature.\n$err")
 # 	    if (&runpgp ("-sat $QPREF.b", $PASSPHRASE, $err)
@@ -2018,7 +2059,7 @@ EOF
 	if ($flags & $FL_FINGERKEY) {
             my $gpg = GnuPG::Interface->new();
 	    my ($key, $block, $ring);
-            my ($input, $output, $stderr, $status, $handles) = mkfds();
+            my ($inputfd, $outputfd, $stderrfd, $statusfd, $handles) = mkfds();
             $gpg->options->hash_init ( extra_args => [ '--no-default-keyring',
                                                '--no-permission-warning',
                                                '--no-tty',
@@ -2029,15 +2070,12 @@ EOF
             my $pid = $gpg->wrap_call (handles => $handles,
                                     commands => [ '--export' ],
                                     command_args => [ $target ]);
-            
-            close $input;
-            my @statusbuff = <$status>;
-            my @errbuff = <$stderr>;
-            close $stderr;
-            print "PGP Public-Key:\n";
-            print while (<$output>);
-            close $output;
+            my ($output, undef, undef) = 
+				readwritegpg ("", $inputfd, $outputfd, $stderrfd,
+							  $statusfd);
             waitpid $pid, 0;
+            print "PGP Public-Key:\n";
+            print $output;
 	}
 	print "\n", $BLURB;
     }
