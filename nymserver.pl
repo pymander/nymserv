@@ -1,5 +1,5 @@
 #!/usr/local/bin/perl -Tw
-# $Revision: 1.1 $
+# $Revision: 1.1.1.1 $
 
 #
 # nymserv email pseudonym server
