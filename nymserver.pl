@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.11 2004/04/03 16:15:20 lfousse Exp $
+# $Id: nymserver.pl,v 1.12 2004/04/07 13:30:42 lfousse Exp $
 
 #
 # nymserv email pseudonym server
@@ -44,7 +44,7 @@ require "sys/syscall.ph";
 # Configuration:
 
 my $HOMEDIR = '/var/lib/nymserv';
-my $HOSTNAME = 'nym.exp.fousse.info';
+my $HOSTNAME = 'nym.komite.net';
 my $SENDMAIL = '/usr/sbin/sendmail';
 my $QMAIL_CODES = 0; # Use qmail rather than sendmail exit codes
 my $REMAIL = '/usr/bin/mixmaster -SR';
@@ -57,7 +57,9 @@ my $NYMKEYID = 'C9AF695DD3BAA2CD';
 my $CONFIRM  = 1;   # Require confirmation of reply-blocks
 my $NOCREATE = 0;   # Don't allow creation of new nyms
 my $QUOTEREQ = 1;   # Quote autoresponder requests
-my $NYMSEND = 0; # Allow nym to send email through the nymserver.
+my $NYMSEND = 1; # Allow nym to send email through the nymserver.
+my $SENDDISCLAIMER = 0; # Send a disclaimer header to messages sent
+                        # through the nym.
 
 my $WARNAFTER   = 90;
 my $DELETEAFTER = 120;
@@ -878,10 +880,12 @@ sub check_sig {
     close MSG;
     print $input @tmpbuf;
     close $input;
-    my @statusbuf = <$status>;
-    my @errorbuf = <$stderr>;
     my @outputbuf = <$output>;
     close $output;
+    my @statusbuf = <$status>;
+    close $status;
+    my @errorbuf = <$stderr>;
+    close $stderr;
     $valid = grep (/GOODSIG/, @statusbuf);
     my ($tstamp) = grep (/VALIDSIG/, @statusbuf);
     $tstamp = (split / /, $tstamp)[4];
@@ -898,6 +902,7 @@ sub check_sig {
         }
         return 1;
     } else {
+        $_[2] = "Invalid signature";
         return 0; # Until Crypt::OpenPGP works.
     }
     
@@ -1463,6 +1468,11 @@ sub runsend {
     &decrypt_stdin;
 
     open (H, ">$QPREF.h");
+    if ($SENDDISCLAIMER) {
+        print H "X-Nym-Disclaimer: This message was sent anonymously through\n";
+        print H "  the $HOSTNAME Nymserver. Please report abuse to ";
+        print H "postmaster\@$HOSTNAME\n";
+    }
     open (B, ">$QPREF.b");
     open (M, "<$QPREF.m")
 	|| &fatal (66, "Could not decrypt message.\n");
