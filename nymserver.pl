@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.3 2002/01/29 00:54:14 dybbuk Exp $
+# $Id: nymserver.pl,v 1.4 2002/02/08 17:39:46 dybbuk Exp $
 
 #
 # nymserv email pseudonym server
@@ -23,8 +23,6 @@
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307
 # USA
 #
-
-use lib '/home/erik/src/Crypt-OpenPGP-0.17/lib';
 
 require 5.003;
 use strict;
@@ -52,6 +50,7 @@ my $REMAIL = '/home/erik/Mix/mix -SR';
 
 my $MD5 = '/usr/bin/md5sum'; # md5sum from GNU textutils
 
+# Specify your nymserver key ID right here.
 my $NYMKEYID = '798E65E7';
 
 # When things get bad:
@@ -89,6 +88,7 @@ my $FL_DISABLED  = 0x200;
 my $FL_FIXEDSZ   = 0x400;
 my $FL_FINGERKEY = 0x800;
 my $FL_NOBCC     = 0x1000;
+my $FL_SPAM      = 0x2000;  # Check incoming mail against spam filters
 my $FL_NOLIMIT   = 0x10000;
 my $DEFFLAGS     = 0xfd;
 
@@ -367,16 +367,40 @@ MIME-Version: 1.0
 
 EOF
 
+sub find_recipient {
+    my ($pubring) = @_;
+
+    # We will work our way through the keys in a public keyring until we
+    # find one that doesn't match the nymserver's keyid.
+    my $ring = Crypt::OpenPGP::KeyRing->new( Filename => $pubring )
+      or die "Ouch! " . Crypt::OpenPGP::KeyRing->errstr;
+    $ring->read;
+    my @blocks = $ring->blocks;
+    
+    foreach my $kb (@blocks) {
+        if (substr($kb->key->key_id_hex, -8, 8) eq $NYMKEYID) {
+            next;
+        } else {
+            return $kb->primary_uid;
+        }
+    }
+
+    return undef;
+}
+              
 sub remail {
     my ($file, $sign, $pubring, $rbfile, $fixedsz) = @_;
     my ($nrbused, $ascfile, $err) = (0);
 
     if ($pubring) {
+        my (%cargs, %encargs, $pgp, $data, $recipient);
         # Surprisingly, this ACTUALLY WORKS.  No, I don't believe it
         # either.  (Caveat: signed mailing hasn't been tested yet)
 	$ascfile = "$file.asc";
 	unlink ("$ascfile");
-        my (%cargs, %encargs, $pgp, $data);
+
+        $recipient = (&find_recipient($pubring) || '@');
+        
         %cargs = (Compat  => 'GnuPG',
                   PubRing => $pubring);
         if ($sign) {
@@ -390,9 +414,9 @@ sub remail {
 
         $data = $pgp->encrypt(Filename   => $file,
                               Armour     => 1,
-                              Recipients => '@',  # Is this going to break sometimes?
+                              Recipients => $recipient,
                               %encargs)
-          or die "Encrypt error: " . $pgp->errstr;
+          or &fatal(0, "Encrypt error: " . $pgp->errstr);
 
         open(O, ">$ascfile") or die "$ascfile: $!\n";
         print O $data;
@@ -1036,7 +1060,8 @@ sub runconfig {
         # doing all of this correctly we'll use that here instead.
 
         $pubring = "$QPREF.pgp";
-        system("cp $RINGPROTO $pubring");
+        # This should hopefully be non-tainted, right?
+        system('/bin/cp', $RINGPROTO, $pubring);
         open(KEY, ">$QPREF.asc")
           or die "$QPREF.asc: $!\n";
         print KEY $pubkey;
@@ -1047,7 +1072,7 @@ sub runconfig {
                                      --secret-keyring=/dev/null
                                      --no-secmem-warning
                                      --quiet --batch --no-tty),
-                            '--homedir', $HOMEDIR,
+                            "--homedir=$HOMEDIR/pgp",
                             "--keyring=$pubring",
                             '--import', "$QPREF.asc");
 
@@ -1071,28 +1096,31 @@ sub runconfig {
 	    $rest = $';
 	    if (/^(\+|-)(\w+)$/) {
 		my $val;
-		if ($2 eq "acksend") {
+		if ($2 eq 'acksend') {
 		    $val = $FL_ACKSEND;
 		}
-		elsif ($2 eq "cryptrecv") {
+		elsif ($2 eq 'cryptrecv') {
 		    $val = $FL_ENCRECV;
 		}
-		elsif ($2 eq "signsend") {
+		elsif ($2 eq 'signsend') {
 		    $val = $FL_SIGSEND;
 		}
-		elsif ($2 eq "disable") {
+		elsif ($2 eq 'disable') {
 		    $val = $FL_DISABLED;
 		    #$incctr = -1 if ($1 eq "-");
 		}
-		elsif ($2 eq "fixedsize") {
+		elsif ($2 eq 'fixedsize') {
 		    $val = $FL_FIXEDSZ;
 		}
-		elsif ($2 eq "fingerkey") {
+		elsif ($2 eq 'fingerkey') {
 		    $val = $FL_FINGERKEY;
 		}
-		elsif ($2 eq "nobcc") {
+		elsif ($2 eq 'nobcc') {
 		    $val = $FL_NOBCC;
 		}
+                elsif ($2 eq 'spamfilter') {
+                    $val = $FL_SPAM;
+                }
 		else {
 		    $err .= "Invalid Nym-Command switch `$1' in `$1$2'.\n";
 		    next;
