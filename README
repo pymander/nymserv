@@ -1,32 +1,17 @@
-Some extremely brief instructions on setting up a nym.alias.net style
+Some extremely brief instructions on setting up a hod.aarg.net style
 nym server.  This assumes you already know about remailers and DNS,
 and sendmail, and have already setup the appropriate DNS records
 (either A or MX) to receive mail at a "nym" domain name on your
 machine.
 
-Make sure you have perl5.003 or later, installed with the DB_File
+Make sure you have Perl 5.6 or later, installed with the DB_File
 module.  Don't forget to run h2ph when installing perl (cd
 /usr/include; h2ph *.h sys/*.h).  If you don't have DB_File, get db
 from ftp.cs.berkeley.edu:/ucb/4bsd/db.1.85.tar.gz, install it, and
 then reinstall perl so that the DB_File module is available.
 
-Make sure you also have a type 1 remailer running.  By default, the
-type1 remailer executable is assumed to be at /usr/remail/remailer.
-If you are using the ghio2 remailer, you will need to add the
-following lines at the start of the main procedure (also make sure you
-define PGPPATH as it will be needed for access to the randseed.bin
-file):
-
-  int lockfd;
-
-  umask (007);
-  lockfd = open (DIR "/lock", O_CREAT|O_WRONLY, 0777);
-  flock (lockfd, LOCK_EX);
-#ifdef PGPPATH
-  strcpy(input,"PGPPATH=");
-  strcat(input,PGPPATH);
-  putenv(input);
-#endif
+Make sure you also have a Mixmaster remailer running.  You will need
+to examine the $REMAIL variable and point it at your Mixmaster binary.
 
 Create a new userid/groupid under which to run the nym.  Call it
 nymuser.
@@ -36,28 +21,46 @@ Create a directory for your nym server to reside in, for example
 subdirectories of /usr/nym:  pgp, queue, and users.  Make sure pgp,
 queue, and users are writeable by user nymuser.
 
-Create a PGP key for your nymserver as follows:
+Use 'su' to change to your nymserver's new user id, then create a
+GnuPG key for your nymserver as follows:
 
-   setenv PGPPATH /usr/nym/pgp
-   pgp -kg
+   gpg --gen-key
 
-Put the corresponding PGP passphrase in the file pgp/passphrase.
+You will want to make sure that the email addresses for the user id
+cover both send@<your-nym-domain> and config@<your-nym-domain>.  For
+example, the hod.aarg.net key looks like this:
+
+   pub  1024D/9721FD57 2002-01-29 Hod Nymserver <send@hod.aarg.net>
+   uid                            Hod Nymserver <config@hod.aarg.net>
+   sub  1024g/9A21D444 2002-01-29
+
+Put the key's GnuPG passphrase in the file pgp/passphrase.
 
 Create files /usr/nym/users/postmaster.forward and
-/usr/nym/users/admin.forward which contain your real E-mail address.
-Create a file users/remailer-key.reply which contains the PGP public
-key you just created.  Create a ring prototype file.
+/usr/nym/users/admin.forward which contain your real email address.
+Create a file users/remailer-key.reply which contains the GnuPG public
+key you just created.  Create a ring prototype file by running
+commands similar to those below.
 
    echo 'From: nobody@nym.alias.net' > users/remailer-key.reply
    echo 'Subject: PGP key for nym.alias.net' >> users/remailer-key.reply
    echo '' >> users/remailer-key.reply
-   pgp +pubring=pgp/pubring.pgp -fkxa >> users/remailer-key.reply
+   gpg --armor --export $YOUR_NEW_KEY_ID >> users/remailer-key.reply
 
    cp pgp/pubring.pgp ring-proto.pgp
 
-Edit the first few lines of the nymserv executable to set your machine
-name and domain name of your nym server.  Make sure you also have
-md5sum (if not, get textutils from prep.ai.mit.edu:/pub/gnu).
+Edit the configuration variables in the nymserver.pl script to set
+your machine name, domain names, and the paths to the needed
+binaries.  Make sure you've installed Crypt::OpenPGP and Digest::MD5.
+Both of these can be downloaded from CPAN (http://www.cpan.org/).
+
+Crypt::OpenPGP has a great number of prerequisites.  You will want to
+support as many different encryption algorithms as possible, so I
+would recommend installing all of them.  Crypt::IDEA is broken,
+however.  To fix it, you will need to edit IDEA.xs and change line 66
+so 'sv_undef' is 'PL_sv_undef'.  Math::Pari is another module to watch
+out for.  Make sure all the tests pass!  Remember, CPAN is your friend
+when it comes to installing Perl modules.
 
 If you have an A record for your nymserver, set up finger support.
 Put a line like this in /etc/inetd.conf:
@@ -131,5 +134,23 @@ dnl
 R$+<@nym.alias.net.>	$#nym $: $1
 -------------------------------------------------------------------------------
 
-And here is the nymserv perl script:
+Here are some additional configuration tips for Postfix users supplied
+by Peter Palfrader (peter@palfrader.org).  I haven't tried them, and
+hopefully some other Postfix users can clarify this if it needs any fixes.
 
+-------------------------------------------------------------------------------
+Use a transport by adding the following to etc/postfix/master.cf:
+
+# service type  private unpriv  chroot  wakeup  maxproc command + args
+#               (yes)   (yes)   (yes)   (never) (50)
+nymserver unix  -       n       n       -       -       pipe
+  flags=3DFR user=3Dnymserv argv=3D/usr/local/bin/nymserv -d $recipient
+
+Add the following to your transport table:
+
+nym.example.com		nymserver:
+
+Then, add this to your main.cf:
+
+relay_domains = ....... nym.example.com
+-------------------------------------------------------------------------------
