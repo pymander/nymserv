@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.10 2002/12/31 15:28:10 dybbuk Exp $
+# $Id: nymserver.pl,v 1.11 2004/04/03 16:15:20 lfousse Exp $
 
 #
 # nymserv email pseudonym server
@@ -30,37 +30,34 @@ use strict;
 use POSIX qw(:errno_h :fcntl_h);
 use DB_File;
 use Socket;
+use Fcntl ':flock';
+use IO::Handle;
 
-# Cryptographic modules.
-use Crypt::OpenPGP;
-use Crypt::OpenPGP::Constants qw( PGP_PKT_PUBLIC_KEY );
+# Cryptographic module.
+use GnuPG::Interface;
 
 # Digest and support modules.
 use Digest::MD5 qw(md5_base64);
 
 require "sys/syscall.ph";
 
-sub LOCK_SH () {0x01;}
-sub LOCK_EX () {0x02;}
-sub LOCK_NB () {0x04;}
-sub LOCK_UN () {0x08;}
-
 # Configuration:
 
-my $HOMEDIR = '/home/erik/Nym';
-my $HOSTNAME = 'sif.musiciansfriend.com';
-my $GPG      = '/usr/bin/gpg';  # Unfortunately still needed for some key management.
+my $HOMEDIR = '/var/lib/nymserv';
+my $HOSTNAME = 'nym.exp.fousse.info';
 my $SENDMAIL = '/usr/sbin/sendmail';
 my $QMAIL_CODES = 0; # Use qmail rather than sendmail exit codes
-my $REMAIL = '/home/erik/Mix/mix -SR';
+my $REMAIL = '/usr/bin/mixmaster -SR';
 
 # Specify your nymserver key ID right here.
-my $NYMKEYID = '798E65E7';
+# Warning : this must be the longkeyid !
+my $NYMKEYID = 'C9AF695DD3BAA2CD';
 
 # When things get bad:
 my $CONFIRM  = 1;   # Require confirmation of reply-blocks
 my $NOCREATE = 0;   # Don't allow creation of new nyms
 my $QUOTEREQ = 1;   # Quote autoresponder requests
+my $NYMSEND = 0; # Allow nym to send email through the nymserver.
 
 my $WARNAFTER   = 90;
 my $DELETEAFTER = 120;
@@ -372,18 +369,33 @@ MIME-Version: 1.0
 
 EOF
 
+sub mkfds() {
+        my %fds = (
+                stdin => IO::Handle->new(),
+                stdout => IO::Handle->new(),
+                stderr => IO::Handle->new(),
+                status => IO::Handle->new() );
+        my $handles = GnuPG::Handles->new( %fds );
+        return ($fds{'stdin'}, $fds{'stdout'}, $fds{'stderr'}, $fds{'status'}, $handles);
+};
+
 sub find_recipient {
     my ($pubring) = @_;
-
-    # We will work our way through the keys in a public keyring until we
-    # find one that doesn't match the nymserver's keyid.
-    my $ring = Crypt::OpenPGP::KeyRing->new( Filename => $pubring )
-      or &fatal(0, "Unable to open $pubring: " . Crypt::OpenPGP::KeyRing->errstr);
-
-    # This fast little replacement suggested by Benjamin Trott.
-    my $kb = $ring->find_keyblock(sub { substr($_[0]->key_id_hex, -8, 8) ne $NYMKEYID },
-                                  [ PGP_PKT_PUBLIC_KEY ] );
-    return $kb ? $kb->primary_uid : undef;
+    my $gnupg = GnuPG::Interface->new();
+    $gnupg->options->hash_init ( extra_args => [ '--no-default-keyring',
+                                                 '--with-colons', 
+                                                 '--fixed-list-mode',
+                                                 '--keyring', $pubring ],
+                                 homedir => $PGPPATH);
+    my ($intput, $output, $stderr, $status, $handles) = mkfds();
+    $gnupg->list_public_keys(handles => $handles);
+    while (<$output>) {
+        next unless (/^pub/);
+        my ($type, $trust, $length, $algo, $longkeyid, $created, $expires,
+            $serial, $ownertrust, $uid, $sigclass, $caps, $issuer, $flag) = 
+             split /:/;
+        return $longkeyid unless ($longkeyid eq $NYMKEYID);
+    }
 }
 
 sub remail {
@@ -405,25 +417,47 @@ sub remail {
         #
         # A better solution may be to add a +pgp5 or +gpg option to the
         # configuration.
-        %cargs = (Compat  => 'PGP5',
-                  PubRing => $pubring);
+
+        my $gpg = GnuPG::Interface->new();
+        $gpg->options->hash_init (armor => 1,
+                                  homedir => $PGPPATH,
+                                  always_trust => 1,
+                                  extra_args => 
+                                             [ '--no-default-keyring',
+                                               '--no-permission-warning',
+                                               '--no-tty',
+                                               '--batch',
+                                               '--keyring', $pubring,
+                                               '--keyring',
+                                               "$PGPPATH/pubring.pgp",
+                                               '--secret-keyring', 
+                                               "$PGPPATH/secring.pgp" ]);
+        my ($inputfd, $stdoutfd, $stderrfd, $statusfd, $handles) = mkfds();
+        my $pid;
+        $gpg->options->push_recipients($recipient);
         if ($sign) {
-            $cargs{SecRing} = "$PGPPATH/secring.pgp";
-            $encargs{SignKeyID}  = $NYMKEYID;
-            $encargs{SignPassphrase} = $PASSPHRASE;
+            $gpg->options->meta_signing_key_id($NYMKEYID);
+            $gpg->passphrase($PASSPHRASE);
+            $pid = $gpg->sign_and_encrypt(handles => $handles);
         }
-            
-        $pgp = Crypt::OpenPGP->new(%cargs)
-          or die Crypt::OpenPGP->errstr;
+        else {
+            $pid = $gpg->encrypt(handles => $handles);
+        }
 
-        $data = $pgp->encrypt(Filename   => $file,
-                              Armour     => 1,
-                              Recipients => $recipient,
-                              %encargs)
-          or &fatal(0, "Encrypt error: " . $pgp->errstr);
-
+        open INDATA, $file;
+        my @tmpbuff = <INDATA>;
+        close INDATA;
+        print $inputfd @tmpbuff;
+        close $inputfd;
+        @tmpbuff = <$stdoutfd>;
+        close $stdoutfd;
+        my @errorbuf = <$stderrfd>;
+        close $stderrfd;
+        my @statusbuf = <$statusfd>;
+        close $statusfd;
+        waitpid $pid, 0;
         open(O, ">$ascfile") or die "$ascfile: $!\n";
-        print O $data;
+        print O @tmpbuff;
         close(O);
     } else {
 	$ascfile = "$file";
@@ -566,15 +600,39 @@ sub decrypt_stdin {
     }
     &fatal (71, "Error writing queue file ($!).\n") unless close (I);
 
-    $ptdata = $PGP->decrypt(Filename   => "$QPREF.i",
-                            Passphrase => $PASSPHRASE);
+    my $gpg = GnuPG::Interface->new();
+    $gpg->options->hash_init ( extra_args => [ '--no-default-keyring',
+                                               '--homedir', $PGPPATH,
+                                               '--no-permission-warning',
+                                               '--no-tty',
+                                               '--batch',
+                                               '--keyring',
+                                               "$PGPPATH/pubring.pgp",
+                                               '--secret-keyring', 
+                                               "$PGPPATH/secring.pgp"]);
+    my ($input, $output, $stderr, $status, $handles) = mkfds();
+    $gpg->passphrase($PASSPHRASE);
+    my $pid = $gpg->decrypt(handles => $handles);
+    open CDATA, "$QPREF.i";
+    my @encdata = <CDATA>;
+    close CDATA;
+    print $input @encdata;
+    close $input;
+    my @decdata = <$output>;
+    close $output;
+    my @status_data = <$status>;
+    my @error_data = <$stderr>;
+    close $status;
+    close $stderr;
+    waitpid $pid, 0;
+    $ptdata = join('', @decdata);
     if (defined $ptdata) {
         open(O, ">$QPREF.m") || &fatal(71, "Error creating queue file $QPREF.m ($!).\n");
         print O $ptdata;
         close(O);
     } else {
         &fatal(66, sprintf("Could not decrypt message: %s",
-                           $PGP->errstr));
+                           <$status>));
     }
 }
 
@@ -803,27 +861,43 @@ sub check_sig {
     my ($pgp, $err, $valid, $ptxt, $intime, $sig);
 
     # Signatures are correctly working now.
-    $pgp = Crypt::OpenPGP->new (Compat  => 'GnuPG',
-                                PubRing => $pubring,
-                                SecRing => "$PGPPATH/secring.pgp")
-      or &fatal(0, Crypt::OpenPGP->errstr . "\n");
-
-    ($ptxt, $valid, $sig) = $pgp->decrypt(Filename   => $message,
-                                          Passphrase => $PASSPHRASE)
-      or &fatal(0, $pgp->errstr . "\n");
+    $pgp = GnuPG::Interface->new();
+    $pgp->options->hash_init ( extra_args => [ '--no-default-keyring',
+                                               '--homedir', $PGPPATH,
+                                               '--keyring', $pubring,
+                                               '--no-permission-warning',
+                                               '--no-tty',
+                                               '--batch',
+                                               '--secret-keyring', 
+                                               "$PGPPATH/secring.pgp"]);
+    my ($input, $output, $stderr, $status, $handles) = mkfds();
+    $pgp->passphrase($PASSPHRASE);
+    my $pid = $pgp->decrypt(handles => $handles);
+    open MSG, $message;
+    my @tmpbuf = <MSG>;
+    close MSG;
+    print $input @tmpbuf;
+    close $input;
+    my @statusbuf = <$status>;
+    my @errorbuf = <$stderr>;
+    my @outputbuf = <$output>;
+    close $output;
+    $valid = grep (/GOODSIG/, @statusbuf);
+    my ($tstamp) = grep (/VALIDSIG/, @statusbuf);
+    $tstamp = (split / /, $tstamp)[4];
+    waitpid $pid, 0;
 
     # Since our public key ring only has two keys in it, this should be
     # safe to do.  However, if we want to be safer we should check the
     # user ID in the signature against the key ID we're looking for, and
     # make sure they match.
     if (defined $valid && $valid
-        && defined $sig) {
-        if (&check_replay($message, $sig->timestamp)) {
+        && defined $tstamp) {
+        if (&check_replay($message, $tstamp)) {
             &fatal(0, "Discarding old or replayed message\n");
         }
         return 1;
     } else {
-        $_[2] = $pgp->errstr;
         return 0; # Until Crypt::OpenPGP works.
     }
     
@@ -1054,46 +1128,34 @@ sub runconfig {
           or die "$QPREF.asc: $!\n";
         print KEY $pubkey;
         close(KEY);
-        # Hairy GPG calling stuff.  Ugh.
-        my $gpgres = system($GPG, qw(--s2k-cipher-algo BLOWFISH
-                                     --no-default-keyring
-                                     --no-secmem-warning
-                                     --quiet --batch --no-tty),
-                            "--secret-keyring=$HOMEDIR/.gnupg/noring.gpg",
-                            "--homedir=$HOMEDIR/pgp",
-                            "--keyring=$pubring",
-                            '--import', "$QPREF.asc");
-
-        if ($gpgres != 0) {
-            &fatal(0,"$GPG exited with $gpgres\n");
+        my $gpg = GnuPG::Interface->new();
+        my ($key, $block, $ring);
+        my ($input, $output, $stderr, $status, $handles) = mkfds();
+        $gpg->options->hash_init ( extra_args => [ '--no-default-keyring',
+                                              '--no-permission-warning',
+                                              '--no-secmem-warning',
+                                              '--no-tty',
+                                              '--batch',
+                                              '--keyring', 
+                                              $pubring,
+                                              '--homedir',
+                                              $PGPPATH ]);
+        my $pid = $gpg->wrap_call (handles => $handles,
+                                   commands => [ '--import' ],
+                                   command_args => [ "$QPREF.asc" ]);
+        close $input;
+        my @tmpbuff = <$output>;
+        close $output;
+        @tmpbuff = <$stderr>;
+        close $stderr;
+        @tmpbuff = <$status>;
+        close $status;
+        my $gpgres = grep(/IMPORT_OK/, @tmpbuff);
+        waitpid $pid, 0;
+        if ($gpgres != 1) {
+            &fatal(0,"GnuPG could not import key.\n");
         }
-        chmod(0660, "$QPREF.pgp");
-
-        # Once Crypt::OpenPGP is working correctly, we will be able to
-        # use code similar to the stuff commented out below to manage
-        # and create our keyrings.  Until this time, we need to use
-        # the GnuPG calls above.
-        
-        # Load our keyring into memory.
-        #my ($tmpr, $newk);
-        #$tmpr = new Crypt::OpenPGP::KeyRing (Filename => "$QPREF.pgp")
-        #  or die Crypt::OpenPGP::KeyRing->errstr;
-        #$tmpr->read;
-
-        # This forces our ASCII armouring to be stripped away!
-        #$newk = new Crypt::OpenPGP::KeyRing (Data => $pubkey)
-        #  or die Crypt::OpenPGP::KeyRing->errstr;
-
-        # There's only one key in there, so this snags it.  Right?
-        #$tmpr->add($newk->find_keyblock_by_index(0));
-        
-        #open(QR, ">$QPREF.pgp") or
-        #  die "$QPREF.pgp: $!";
-        #print QR $tmpr->save;
-        #close(QR);
-
-        #chmod(0600, "$QPREF.pgp");
-        #system("cp $pubring /tmp");
+        chmod(0660, $pubring);
     }
 
     my $incctr = 0;
@@ -1541,6 +1603,12 @@ EOF
 	unlock_user ($user);
     }
 
+    # Check is nym-sending is allowed at this host
+    unless ($NYMSEND) {
+        $notmailed = 'NOT ';
+        $warnings .= "Sending through your nym is disallowed at this host.\n";
+    }
+
     if ($flags & $FL_DISABLED) {
 	$notmailed = 'NOT ';
 	$warnings .= "Your nym account is disabled.\n"
@@ -1555,12 +1623,35 @@ EOF
         # Ok, this is now working.  Clearsigning makes sure that it's
         # actually readable at the destination, which is ganz toll,
         # ja?
-        my $signed = $PGP->sign(Filename   => "$QPREF.b",
-                                Passphrase => $PASSPHRASE,
-                                Armour     => 1,
-                                Clearsign  => 1,
-                                KeyID      => $NYMKEYID)
-          or &fatal(78, $PGP->errstr);
+        my $gpg = GnuPG::Interface->new();
+        $gpg->options->hash_init (armor => 1,
+                                  homedir => $PGPPATH,
+                                  extra_args => [ '--no-default-keyring',
+                                                  '--no-permission-warning',
+                                                  '--no-tty',
+                                                  '--batch',
+                                                  '--keyring',
+                                                  "$PGPPATH/pubring.pgp",
+                                                  '--secret-keyring', 
+                                                   "$PGPPATH/secring.pgp" ]);
+        my ($inputfd, $stdoutfd, $stderrfd, $statusfd, $handles) = mkfds();
+        $gpg->options->meta_signing_key_id($NYMKEYID);
+        $gpg->passphrase($PASSPHRASE);
+
+        my $pid = $gpg->clearsign(handles => $handles);
+        open TOSIGN, "$QPREF.b";
+        my @datats = <TOSIGN>;
+        close TOSIGN;
+        print $inputfd @datats;
+        close $inputfd;
+        my @signedout = <$stdoutfd>;
+        close $stdoutfd;
+        my @errorbuf = <$stderrfd>;
+        close $stderrfd;
+        my @statusbuff = <$statusfd>;
+        close $statusfd;
+        waitpid $pid, 0;
+        my $signed = join('', @signedout);
         open(SB, ">$QPREF.b.asc")
           or &fatal(78, "Could not create PGP signature.\n$!");
         print SB $signed;
@@ -1589,11 +1680,11 @@ EOF
     elsif ($hiddento) {
 	open (SEND, "|-")
 	    || exec ($SENDMAIL, "-f", "$user\@$HOSTNAME",
-		     "-os", "-oem", "-oi", "--", (@recips))
+		     "-oem", "-oi", "--", (@recips))
 		|| &fatal (1, "Couldn't run $SENDMAIL @recips\n");
     }
     else {
-	open (SEND, "| $SENDMAIL -f $user\@$HOSTNAME -os -oem -oi -t");
+	open (SEND, "| $SENDMAIL -f $user\@$HOSTNAME -oem -oi -t");
     }
     copyfile (*H, *SEND);
     copyfile (*B, *SEND);
@@ -1915,16 +2006,28 @@ EOF
 	printf STDOUT ("Mail Alias:  %-24s  Name:  %s\n", $target,
 		       ($fullname && $fullname =~ /\S/) ? $fullname : "???");
 	if ($flags & $FL_FINGERKEY) {
-            use Crypt::OpenPGP::Armour;
+            my $gpg = GnuPG::Interface->new();
 	    my ($key, $block, $ring);
+            my ($input, $output, $stderr, $status, $handles) = mkfds();
+            $gpg->options->hash_init ( extra_args => [ '--no-default-keyring',
+                                               '--no-permission-warning',
+                                               '--no-tty',
+                                               '--batch',
+                                               '--keyring', 
+                                               "$NDIR/$target.pgp",
+                                               '--armour']);
+            my $pid = $gpg->wrap_call (handles => $handles,
+                                    commands => [ '--export' ],
+                                    command_args => [ $target ]);
             
-            $ring = Crypt::OpenPGP::KeyRing->new(Filename => "$NDIR/$target.pgp")
-              or die Crypt::OpenPGP::KeyRing->errstr;
-            $block  = $ring->find_keyblock_by_uid($target);
-            $key  = Crypt::OpenPGP::Armour->armour(Data => $block->save,
-                                                   Object => 'PUBLIC KEY BLOCK');
-	    print "PGP Public-Key:\n$key"
-		if $key =~ /^-----BEGIN PGP PUBLIC KEY BLOCK-----/;
+            close $input;
+            my @statusbuff = <$status>;
+            my @errbuff = <$stderr>;
+            close $stderr;
+            print "PGP Public-Key:\n";
+            print while (<$output>);
+            close $output;
+            waitpid $pid, 0;
 	}
 	print "\n", $BLURB;
     }
@@ -2054,6 +2157,16 @@ EOF
     }
 }
 
+sub logthis {
+    my $line = shift;
+    open LOG, ">> " . $HOMEDIR . "/log";
+    flock (LOG, LOCK_EX);
+    print LOG "$line\n";
+    flock (LOG, LOCK_UN);
+    close LOG;
+}
+
+
 umask (007);
 $( = (split /\s+/, $), 2)[0];
 $< = $>;
@@ -2065,11 +2178,6 @@ my $flag = shift;
 if (!$flag) {
     &usage;
 } else {
-    # This continues to use GnuPG compatibility because we'll need to
-    # decrypt and verify all sorts of incoming goofiness.
-    $PGP = new Crypt::OpenPGP (Compat  => 'GnuPG',
-                               SecRing => "$PGPPATH/secring.pgp",
-                               PubRing => "$PGPPATH/pubring.pgp");
     if ($flag eq '-d') { &rundeliver (@ARGV); }
     elsif ($flag eq '-fingerd') { &runfingerd; }
     elsif ($flag eq '-wipe') { &runwipe (@ARGV); }
