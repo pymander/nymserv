@@ -1,5 +1,5 @@
-#!/usr/local/bin/perl -Tw
-# $Revision: 1.1 $
+#!/usr/bin/perl -w
+# $Id: nymserver.pl,v 1.2 2002/01/25 20:30:05 dybbuk Exp $
 
 #
 # nymserv email pseudonym server
@@ -24,12 +24,15 @@
 # USA
 #
 
+use lib '/home/erik/src/Crypt-OpenPGP-0.17/lib';
+
 require 5.003;
 use strict;
 
 use POSIX qw(:errno_h :fcntl_h);
 use DB_File;
 use Socket;
+use Crypt::OpenPGP;
 
 require "sys/syscall.ph";
 
@@ -40,65 +43,66 @@ sub LOCK_UN () {0x08;}
 
 # Configuration:
 
-my $HOMEDIR = '/usr/nym';
-my $HOSTNAME = 'nym.alias.net';
-
-my $SENDMAIL = '/usr/lib/sendmail';
+my $HOMEDIR = '/home/erik/Nym';
+my $HOSTNAME = 'sif.musiciansfriend.com';
+my $GPG      = '/usr/bin/gpg';  # Unfortunately still needed for some key management.
+my $SENDMAIL = '/usr/sbin/sendmail';
 my $QMAIL_CODES = 0; # Use qmail rather than sendmail exit codes
-my $REMAIL = '/usr/remail/remailer';
-my $PGP = '/usr/local/bin/pgp';
-my $MD5 = '/usr/local/bin/md5sum'; # md5sum from GNU textutils
+my $REMAIL = '/home/erik/Mix/mix -R';
+
+my $MD5 = '/usr/bin/md5sum'; # md5sum from GNU textutils
 
 # When things get bad:
-my $CONFIRM = 0;    # Require confirmation of reply-blocks
+my $CONFIRM  = 1;   # Require confirmation of reply-blocks
 my $NOCREATE = 0;   # Don't allow creation of new nyms
 my $QUOTEREQ = 1;   # Quote autoresponder requests
 
-my $WARNAFTER = 90;
+my $WARNAFTER   = 90;
 my $DELETEAFTER = 120;
 
 # Stuff you probably don't need to change:
-my $PGPPATH = $HOMEDIR . "/pgp";
+my $PGPPATH        = $HOMEDIR . "/pgp";
 my $PASSPHRASEFILE = $PGPPATH . "/passphrase";
-my $RINGPROTO = "$HOMEDIR/ring-proto.pgp"; # Pubring with just our pub key
-my $REPLAY = "$HOMEDIR/replay.db";   # Replay cache
-my $CCC = "$HOMEDIR/confirm.db";     # Confirmation cookie cache
-my $NDIR = $HOMEDIR . '/users';
-my $QDIR = $HOMEDIR . '/queue';
-my $QNAM = "q.$$";
+my $RINGPROTO      = "$HOMEDIR/ring-proto.pgp"; # Pubring with just our pub key
+my $REPLAY         = "$HOMEDIR/replay.db";   # Replay cache
+my $CCC   = "$HOMEDIR/confirm.db";     # Confirmation cookie cache
+my $NDIR  = $HOMEDIR . '/users';
+my $QDIR  = $HOMEDIR . '/queue';
+my $QNAM  = "q.$$";
 my $QPREF = $QDIR . "/" . $QNAM;
 
 my $PGPLOCK = "$QDIR/pgplock";      # Lock for unique access to randseed.bin
 
-my $MAXLINES = 1024;
+my $MAXLINES  = 1024;
 my $MSGPERDAY = 512;
 my $MSGSZUNIT = 32768;
-my $MSGSIZE = 10240;
-my $SIGDAYS = 7; # Number of days a digital signature is good for
+my $MSGSIZE   = 10240;
+my $SIGDAYS   = 7; # Number of days a digital signature is good for
 
 # Flags in user ".dat" file:
-my $FL_ENCRECV = 0x1;
-my $FL_SIGSEND = 0x2;
-my $FL_ACKSEND = 0x100;
-my $FL_DISABLED = 0x200;
-my $FL_FIXEDSZ = 0x400;
+my $FL_ENCRECV   = 0x1;
+my $FL_SIGSEND   = 0x2;
+my $FL_ACKSEND   = 0x100;
+my $FL_DISABLED  = 0x200;
+my $FL_FIXEDSZ   = 0x400;
 my $FL_FINGERKEY = 0x800;
-my $FL_NOBCC = 0x1000;
-my $FL_NOLIMIT = 0x10000;
-my $DEFFLAGS = 0xfd;
+my $FL_NOBCC     = 0x1000;
+my $FL_NOLIMIT   = 0x10000;
+my $DEFFLAGS     = 0xfd;
 
 my @RSVD_NAMES = ("config", "send", "list", "root",
 		  "nobody", "used", "confirm", "postmaster");
 
 undef %ENV;
-$ENV{'PATH'} = '/bin:/usr/bin:/usr/local/bin';
-$ENV{'SHELL'} = '/bin/sh';
-$ENV{'IFS'} = ' \t\r';
+$ENV{'PATH'}    = '/bin:/usr/bin:/usr/local/bin';
+$ENV{'SHELL'}   = '/bin/sh';
+$ENV{'IFS'}     = ' \t\r';
 $ENV{'PGPPATH'} = $PGPPATH;
 
-$SIG{'TERM'} = \&handler;
+$SIG{'TERM'}    = \&handler;
 
 my $PASSPHRASE;
+my $PGP;
 
 my $msgmd5;             # MD5 hash of message signature.
 my $rmsgid;             # Unique message identifier for received messaged
@@ -192,19 +196,31 @@ sub catfile {
 
 my $rndbuf = "";
 sub randomval () {
-    if (length ($rndbuf) < 4) {
-	unlink ("$QPREF.rnd");
-	&runpgp ("+makerandom=20 $QPREF.rnd");
-	$rndbuf = &catfile ("$QPREF.rnd");
-	unlink ("$QPREF.rnd");
+    # What's the best way to generate a random number?  Nymserv used to
+    # use PGP to generate 20 random bytes, but I think this works much
+    # better.
+    if (length($rndbuf) < 4) {
+        if ( -r '/dev/random' ) {
+            open(RAND, "</dev/random") or
+              die "/dev/random: $!\n";
+            binmode(RAND);
+            read(RAND, $rndbuf, 20, 0);
+            close(RAND);
+        } else {
+            die "No good way to generate random numbers.  Help!\n";
+        }
     }
-    my $val = vec ($rndbuf, 0, 32);
-    $rndbuf = substr ($rndbuf, 4);
-    $val;
+
+    my $val = vec($rndbuf, 0, 32);
+    $rndbuf = substr($rndbuf, 4);
+
+    return $val;
 }
+
 sub randomstr () {
     &armor3bytes (&randomval);
 }
+
 sub randomfloat {
     my $val = &randomval & 0xffff;
     $val /= 65536.0;
@@ -291,11 +307,13 @@ sub fatal {
     &leave ($_[0]);
 }
 
-sub runpgp ($;$$) {
+sub rungpg ($;$$) {
     my ($cmd, $passphrase) = @_;
     my ($ret, $out, $oldflush);
     local (*LF);
 
+    print "Running GPG with $cmd\n";
+    
     pipe (RPP, WPP) || die "pipe failed" if ($passphrase);
     pipe (ROP, WOP) || die "pipe failed";
     if ($PGPLOCK) {
@@ -308,6 +326,7 @@ sub runpgp ($;$$) {
     unless ($pgppid = fork) {
 	close LF;
 	close ROP;
+        print STDERR "+ $GPG --batch --comment 'NymServ 1.0' --quiet $cmd\n";
 	#print (STDERR "+ $PGP +batchmode +force +verbose=0 $cmd\n");
 	open (STDOUT, ">&WOP") || die "couldn't reopen stdout";
 	open (STDERR, ">&WOP") || die "couldn't reopen stdout";
@@ -317,9 +336,11 @@ sub runpgp ($;$$) {
 	    close WPP;
 	    $ENV{'PGPPASSFD'} = fileno RPP;
 	}
-	unless (exec ("$PGP +batchmode +force +verbose=0 +armorlines=0"
-		      . " $cmd")) {
-	    print STDERR "Exec of PGP failed.\n";
+        ### WORK2
+        #print STDERR "$GPG --batch --comment 'NymServ 1.0' --quiet $cmd\n";
+	unless (exec ("$GPG --batch --comment 'NymServ 1.0' --verbose -t "
+		      . $cmd)) {
+	    print STDERR "Exec of GnuPG failed.\n";
 	    exit (1);
 	}
     }
@@ -334,6 +355,7 @@ sub runpgp ($;$$) {
     }
     $out = "";
     while (<ROP>) {
+        print "Out: $_";
 	$out .= $_;
     }
     close (ROP);
@@ -345,9 +367,11 @@ sub runpgp ($;$$) {
 	flock LF, &LOCK_UN;
 	close LF;
     }
-    # printf STDERR "PGP status: 0x%x\n", $ret;
+    #printf STDERR "GnuPG status: 0x%x\n", $ret;
     $_[2] = $out;
+    #die "I'm right where I want me";
     return ($ret>>8);
+    
 }
 
 my @BINCHARS = ('-', '0' .. '9', 'A' .. 'Z', '_', 'a' .. 'z');
@@ -548,6 +572,8 @@ sub sendtouser {
 
 sub decrypt_stdin {
     my $err;
+    my ($ptdata, $sig, $encdata);
+    
     open (I, ">$QPREF.i") || &fatal (71, "Error creating queue file ($!).\n");
     while (<STDIN>) { last if /^-----BEGIN PGP MESSAGE-----\s*$/; }
     while ($_) {
@@ -556,9 +582,16 @@ sub decrypt_stdin {
     }
     &fatal (71, "Error writing queue file ($!).\n") unless close (I);
 
-    &runpgp ("-b $QPREF.i -o $QPREF.m", $PASSPHRASE, $err);
-    &fatal (66, "Could not decrypt message.\n", $err)
-	unless (-f "$QPREF.m");
+    $ptdata = $PGP->decrypt(Filename   => "$QPREF.i",
+                            Passphrase => $PASSPHRASE);
+    if (defined $ptdata) {
+        open(O, ">$QPREF.m") || &fatal(71, "Error creating queue file $QPREF.m ($!).\n");
+        print O $ptdata;
+        close(O);
+    } else {
+        &fatal(66, sprintf("Could not decrypt message: %s",
+                           $PGP->errstr));
+    }
 }
 
 my $TODAY;
@@ -790,21 +823,27 @@ sub check_replay {
 
 sub check_sig {
     my ($pubring, $message) = @_;
-    my $err;
+    my ($pgp, $err, $valid, $ptxt);
 
-    if (&runpgp ("+secring=/dev/null +pubring=$pubring"
-		 . " $message.sig $message", undef, $err)
-	|| ($err =~
-	    /^Good signature from user.*<(config|send)\@$HOSTNAME>/m)) {
-	$_[2] = "Invalid PGP signature.\n";
-	return undef;
+    ## SIGWORK
+    $pgp = Crypt::OpenPGP->new (PubRing => $pubring,
+                                SecRing => "$PGPPATH/secring.pgp")
+      or die Crypt::OpenPGP->errstr;
+
+    print "Made it this far! ($message)\n";
+    
+    ($ptxt, $valid) = $pgp->decrypt(Filename   => $message,
+                                    Passphrase => $PASSPHRASE)
+      or die $pgp->errstr;
+
+    if (defined $valid) {
+        print "Valid: ", $pgp->errstr;
+        return 1;
+    } else {
+        print "Not Valid: ", $pgp->errstr;
+        $_[2] = $pgp->errstr;
+        return 0;
     }
-    if (&check_replay ("$message.sig", $err)) {
-	&fatal (0, "Discarding replay or old message.\n");
-#	$_[2] = "Message replay or invalid date on PGP signature.\n";
-#	return undef;
-    }
-    return 1;
 }
 
 sub check_username {
@@ -958,6 +997,7 @@ sub runconfig {
     $_ || &fatal (0, "Discarding empty input message.\n");
   hdrloop:
     while (<M>) {
+        s/\r\n/\n/;
 	if ($. > $MAXLINES) {
 	    $err .= "Header exceeds maximum number of lines.\n";
 	    last;
@@ -982,7 +1022,7 @@ sub runconfig {
 	    if (defined ($pubkey)) {
 		$err .= "duplicate Public-Key: line\n";
 	    } else {
-		$pubkey = "";
+		$pubkey = '';
 		while (<M>) {
 		    $pubkey .= $_;
 		    last if /^-----END/;
@@ -1019,27 +1059,23 @@ sub runconfig {
 	    || &fatal (70, "Can't open reply block file ($!)\n");
 	&fatal (74, "Error updating reply block ($!).\n")
 	    unless ((print RB $rblock) && close (RB));
-	system ("chflags nodump $QPREF.rb");
+	#system ("chflags nodump $QPREF.rb");
     }
     if ($pubkey) {
-	$pubring = "$QPREF.pgp";
-	system ("cp $RINGPROTO $pubring");
-	open (ASC, ">$QPREF.asc")
-	    || &fatal (70, "Can't open public key file ($!)\n");
-	select ((select (ASC), $| = 1)[$[]);
-	&fatal (74, "Error updating public key file ($!).\n")
-	    unless ((print ASC $pubkey) && close (ASC));
-	if (&runpgp ("-ka +secring=/dev/null"
-		     . " +pubring=$pubring"
-		     . " $QPREF.asc", undef, $pgperr)
-	    || $pgperr !~ /^\s*1 new key/m) {
-	    $err .= "Error setting new public key:$pgperr\n";
-	    undef ($pubring);
-	}
-	else {
-	    chmod (0660, "$QPREF.pgp");
-	    system ("chflags nodump $QPREF.pgp");
-	}
+        # Add this key to our keyring.  WORK
+        my ($tmpr);
+        $tmpr = new Crypt::OpenPGP::KeyRing (Data => $pubkey)
+          or die Crypt::OpenPGP::KeyRing->errstr;
+        $tmpr->read;
+        
+        open(QR, ">$QPREF.pgp") or
+          die "$QPREF.pgp: $!";
+        print QR $tmpr->save;
+        close(QR);
+
+        chmod(0660, "$QPREF.pgp");
+        print "Wrote $QPREF.pgp successfully\n";
+        $pubring = "$QPREF.pgp";
     }
 
     my $incctr = 0;
@@ -1154,7 +1190,8 @@ EOF
 	    $rbfile || ($err .= "You must specify at least one reply-block"
 			. " with \"Reply-Block\".\n");
 	    if ($pubring) {
-		&check_sig ($pubring, "$QPREF.m", $pgperr)
+                ## WORK
+		&check_sig ($pubring, "$QPREF.i", $pgperr)
 		    || ($err .= "$pgperr  (when checking against the public"
 			. "key in your message)\n");
 	    }
@@ -1672,7 +1709,7 @@ sub rundeliver {
     &clean;
     fatal (64, "Usage: nymserv -d recipient\n") unless (@ARGV == 1);
     fatal (67, "Invalid username\n")
-	unless ($ARGV[0] =~ /^(\w[\w-]{1,15})(\+[\w-]*)?$/);
+      unless ($ARGV[0] =~ /^(\w[\w-]{1,15})(\+[\w-]*)?$/);
     my $recip = lc $1;
     my $plussed = $2;
 
@@ -2004,11 +2041,18 @@ chdir ($HOMEDIR) || die "$HOMEDIR: $!";
 $SIG{'ALRM'} = \&handler;
 
 my $flag = shift;
-if (!$flag) { &usage; }
-elsif ($flag eq '-d') { &rundeliver (@ARGV); }
-elsif ($flag eq '-fingerd') { &runfingerd; }
-elsif ($flag eq '-wipe') { &runwipe (@ARGV); }
-elsif ($flag eq '-expire') { &runexpire (@ARGV); }
-else { &usage; }
+
+if (!$flag) {
+    &usage;
+} else {
+    $PGP = new Crypt::OpenPGP (Compat  => 'GnuPG',
+                               SecRing => "$PGPPATH/secring.pgp",
+                               PubRing => "$PGPPATH/pubring.pgp");
+    if ($flag eq '-d') { &rundeliver (@ARGV); }
+    elsif ($flag eq '-fingerd') { &runfingerd; }
+    elsif ($flag eq '-wipe') { &runwipe (@ARGV); }
+    elsif ($flag eq '-expire') { &runexpire (@ARGV); }
+    else { &usage; }
+}
 &leave (0);
 
