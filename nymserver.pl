@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.2 2002/01/25 20:30:05 dybbuk Exp $
+# $Id: nymserver.pl,v 1.3 2002/01/29 00:54:14 dybbuk Exp $
 
 #
 # nymserv email pseudonym server
@@ -48,9 +48,11 @@ my $HOSTNAME = 'sif.musiciansfriend.com';
 my $GPG      = '/usr/bin/gpg';  # Unfortunately still needed for some key management.
 my $SENDMAIL = '/usr/sbin/sendmail';
 my $QMAIL_CODES = 0; # Use qmail rather than sendmail exit codes
-my $REMAIL = '/home/erik/Mix/mix -R';
+my $REMAIL = '/home/erik/Mix/mix -SR';
 
 my $MD5 = '/usr/bin/md5sum'; # md5sum from GNU textutils
+
+my $NYMKEYID = '798E65E7';
 
 # When things get bad:
 my $CONFIRM  = 1;   # Require confirmation of reply-blocks
@@ -97,7 +99,7 @@ undef %ENV;
 $ENV{'PATH'}    = '/bin:/usr/bin:/usr/local/bin';
 $ENV{'SHELL'}   = '/bin/sh';
 $ENV{'IFS'}     = ' \t\r';
-$ENV{'PGPPATH'} = $PGPPATH;
+$ENV{'GNUPGHOME'} = $PGPPATH;
 
 $SIG{'TERM'}    = \&handler;
 
@@ -307,73 +309,6 @@ sub fatal {
     &leave ($_[0]);
 }
 
-sub rungpg ($;$$) {
-    my ($cmd, $passphrase) = @_;
-    my ($ret, $out, $oldflush);
-    local (*LF);
-
-    print "Running GPG with $cmd\n";
-    
-    pipe (RPP, WPP) || die "pipe failed" if ($passphrase);
-    pipe (ROP, WOP) || die "pipe failed";
-    if ($PGPLOCK) {
-	open LF, ">$PGPLOCK";
-	flock LF, &LOCK_EX;
-    }
-    $oldflush = $|;        # Flush STDOUT before forking
-    $| = 1;
-    print "";
-    unless ($pgppid = fork) {
-	close LF;
-	close ROP;
-        print STDERR "+ $GPG --batch --comment 'NymServ 1.0' --quiet $cmd\n";
-	#print (STDERR "+ $PGP +batchmode +force +verbose=0 $cmd\n");
-	open (STDOUT, ">&WOP") || die "couldn't reopen stdout";
-	open (STDERR, ">&WOP") || die "couldn't reopen stdout";
-	close (STDIN);
-	close WOP;
-	if ($passphrase) {
-	    close WPP;
-	    $ENV{'PGPPASSFD'} = fileno RPP;
-	}
-        ### WORK2
-        #print STDERR "$GPG --batch --comment 'NymServ 1.0' --quiet $cmd\n";
-	unless (exec ("$GPG --batch --comment 'NymServ 1.0' --verbose -t "
-		      . $cmd)) {
-	    print STDERR "Exec of GnuPG failed.\n";
-	    exit (1);
-	}
-    }
-    $| = $oldflush;
-    close WOP;
-    # Be prepared for PGP to hang
-    alarm (120);
-    if ($passphrase) {
-	close RPP;
-	print WPP "$passphrase\n";
-	close WPP;
-    }
-    $out = "";
-    while (<ROP>) {
-        print "Out: $_";
-	$out .= $_;
-    }
-    close (ROP);
-    waitpid ($pgppid, 0);
-    undef $pgppid;
-    alarm (0);
-    $ret = $?;
-    if ($PGPLOCK) {
-	flock LF, &LOCK_UN;
-	close LF;
-    }
-    #printf STDERR "GnuPG status: 0x%x\n", $ret;
-    $_[2] = $out;
-    #die "I'm right where I want me";
-    return ($ret>>8);
-    
-}
-
 my @BINCHARS = ('-', '0' .. '9', 'A' .. 'Z', '_', 'a' .. 'z');
 sub armor3bytes {
     my ($val) = @_;
@@ -385,6 +320,7 @@ sub armor3bytes {
     }
     return $str;
 }
+
 # lineofgarbage generates text that should be hard to compress, not
 # that is cryptographically random.
 srand 0;
@@ -430,17 +366,37 @@ Content-type: message/partial; id=\"%s\"; number=%d; total=%d
 MIME-Version: 1.0
 
 EOF
+
 sub remail {
     my ($file, $sign, $pubring, $rbfile, $fixedsz) = @_;
     my ($nrbused, $ascfile, $err) = (0);
 
     if ($pubring) {
+        # Surprisingly, this ACTUALLY WORKS.  No, I don't believe it
+        # either.  (Caveat: signed mailing hasn't been tested yet)
 	$ascfile = "$file.asc";
 	unlink ("$ascfile");
-	&runpgp (($sign ?
-		  "-seat +pubring=$pubring -u $HOSTNAME" :
-		  "-eat +pubring=$pubring +secring=/dev/null")
-		 . " $file 0x -o $ascfile", $PASSPHRASE, $err);
+        my (%cargs, %encargs, $pgp, $data);
+        %cargs = (Compat  => 'GnuPG',
+                  PubRing => $pubring);
+        if ($sign) {
+            $cargs{SecRing} = "$PGPPATH/secring.pgp";
+            $encargs{SignKeyID}  = $NYMKEYID;
+            $encargs{SignPassphrase} = $PASSPHRASE;
+        }
+            
+        $pgp = Crypt::OpenPGP->new(%cargs)
+          or die Crypt::OpenPGP->errstr;
+
+        $data = $pgp->encrypt(Filename   => $file,
+                              Armour     => 1,
+                              Recipients => '@',  # Is this going to break sometimes?
+                              %encargs)
+          or die "Encrypt error: " . $pgp->errstr;
+
+        open(O, ">$ascfile") or die "$ascfile: $!\n";
+        print O $data;
+        close(O);
     } else {
 	$ascfile = "$file";
 	$err = "Fatal internal error.\n";
@@ -675,7 +631,7 @@ sub write_user_dat {
     if (defined ($flags)) { $vals[3] = $flags; }
     if (defined ($name)) { $vals[4] = $name; }
     my $path = &tmpfile ("$vals[0] $vals[1] $vals[2] $vals[3]\n$vals[4]\n");
-    system ("chflags nodump $path");
+    #system ("chflags nodump $path");
     sync ($path);
     rename ($path, "$NDIR/$user.dat");
     &unlock_user ($user);
@@ -826,24 +782,27 @@ sub check_sig {
     my ($pgp, $err, $valid, $ptxt);
 
     ## SIGWORK
-    $pgp = Crypt::OpenPGP->new (PubRing => $pubring,
+    # Currently I can't seem to get signatures to be checked correctly.
+    # I'm not sure what's causing this.
+    $pgp = Crypt::OpenPGP->new (Compat  => 'GnuPG',
+                                PubRing => $pubring,
                                 SecRing => "$PGPPATH/secring.pgp")
       or die Crypt::OpenPGP->errstr;
 
-    print "Made it this far! ($message)\n";
-    
     ($ptxt, $valid) = $pgp->decrypt(Filename   => $message,
                                     Passphrase => $PASSPHRASE)
       or die $pgp->errstr;
 
+    # Since our public key ring only has two keys in it, this should be
+    # safe to do.
     if (defined $valid) {
-        print "Valid: ", $pgp->errstr;
         return 1;
     } else {
-        print "Not Valid: ", $pgp->errstr;
         $_[2] = $pgp->errstr;
-        return 0;
+        #return 0;
+        return 0; # Until Crypt::OpenPGP works.
     }
+    
 }
 
 sub check_username {
@@ -875,7 +834,7 @@ sub authorize_user {
 	$_[1] = $err;
 	return undef;
     }
-    unless (&check_sig ("$NDIR/$user.pgp", "$QPREF.m", $err)) {
+    unless (&check_sig ("$NDIR/$user.pgp", "$QPREF.i", $err)) {
 	$_[1] = $err;
 	return undef;
     }
@@ -1063,19 +1022,40 @@ sub runconfig {
     }
     if ($pubkey) {
         # Add this key to our keyring.  WORK
-        my ($tmpr);
-        $tmpr = new Crypt::OpenPGP::KeyRing (Data => $pubkey)
-          or die Crypt::OpenPGP::KeyRing->errstr;
-        $tmpr->read;
+#         my ($tmpr);
+#         $tmpr = new Crypt::OpenPGP::KeyRing (Data => $pubkey)
+#           or die Crypt::OpenPGP::KeyRing->errstr;
+#         $tmpr->read;
         
-        open(QR, ">$QPREF.pgp") or
-          die "$QPREF.pgp: $!";
-        print QR $tmpr->save;
-        close(QR);
+#         open(QR, ">$QPREF.pgp") or
+#           die "$QPREF.pgp: $!";
+#         print QR $tmpr->save;
+#         close(QR);
 
-        chmod(0660, "$QPREF.pgp");
-        print "Wrote $QPREF.pgp successfully\n";
+        # Arg.  Currently this is a GnuPG hack.  When Crypt::OpenPGP is
+        # doing all of this correctly we'll use that here instead.
+
         $pubring = "$QPREF.pgp";
+        system("cp $RINGPROTO $pubring");
+        open(KEY, ">$QPREF.asc")
+          or die "$QPREF.asc: $!\n";
+        print KEY $pubkey;
+        close(KEY);
+        # Hairy GPG calling stuff.  Ugh.
+        my $gpgres = system($GPG, qw(--s2k-cipher-algo BLOWFISH
+                                     --no-default-keyring
+                                     --secret-keyring=/dev/null
+                                     --no-secmem-warning
+                                     --quiet --batch --no-tty),
+                            '--homedir', $HOMEDIR,
+                            "--keyring=$pubring",
+                            '--import', "$QPREF.asc");
+
+        if ($gpgres != 0) {
+            die "$GPG exited with $gpgres\n";
+        }
+        chmod(0660, "$QPREF.pgp");
+        #system("cp $pubring /tmp");
     }
 
     my $incctr = 0;
@@ -1192,16 +1172,16 @@ EOF
 	    if ($pubring) {
                 ## WORK
 		&check_sig ($pubring, "$QPREF.i", $pgperr)
-		    || ($err .= "$pgperr  (when checking against the public"
-			. "key in your message)\n");
+                  || ($err .= "$pgperr  (when checking against the public"
+                      . "key in your message)\n");
 	    }
 	    else {
 		$err .= "You must specify a PGP public key with"
-		    . " \"Public-Key:\".\n";
+                  . " \"Public-Key:\".\n";
 	    }
 	    if ($err || -f "$NDIR/$user.pgp") {
 		$err .= "The username you chose is already in use.\n"
-		    unless ($err);
+                  unless ($err);
 	    }
 	}
     }
@@ -1531,9 +1511,19 @@ EOF
 
     my $err;
     if (!$notmailed && ($flags & $FL_SIGSEND) && $hasbody) {
-	&fatal (78, "Could not create PGP signature.\n$err")
-	    if (&runpgp ("-sat $QPREF.b", $PASSPHRASE, $err)
-		|| ! -f "$QPREF.b.asc");
+        # THIS NEEDS TESTING BADLY
+        my $signed = $PGP->sign(Filename   => "$QPREF.b",
+                                Passphrase => $PASSPHRASE,
+                                Armour     => 1,
+                                KeyID      => $NYMKEYID)
+          or &fatal(78, $PGP->errstr);
+        open(SB, ">$QPREF.b.asc")
+          or &fatal(78, "Could not create PGP signature.\n$!");
+        print SB $signed;
+        close(SB);
+# 	&fatal (78, "Could not create PGP signature.\n$err")
+# 	    if (&runpgp ("-sat $QPREF.b", $PASSPHRASE, $err)
+# 		|| ! -f "$QPREF.b.asc");
     }
     else {
 	rename "$QPREF.b", "$QPREF.b.asc";
@@ -1881,9 +1871,14 @@ EOF
 	printf STDOUT ("Mail Alias:  %-24s  Name:  %s\n", $target,
 		       ($fullname && $fullname =~ /\S/) ? $fullname : "???");
 	if ($flags & $FL_FINGERKEY) {
-	    my $key;
-	    &runpgp ("-fkxa '<$target\@$HOSTNAME>' $NDIR/$target.pgp"
-		     . " 2> /dev/null", undef, $key);
+            use Crypt::OpenPGP::Armour;
+	    my ($key, $block, $ring);
+            
+            $ring = Crypt::OpenPGP::KeyRing->new(Filename => "$NDIR/$target.pgp")
+              or die Crypt::OpenPGP::KeyRing->errstr;
+            $block  = $ring->find_keyblock_by_uid($target);
+            $key  = Crypt::OpenPGP::Armour->armour(Data => $block->save,
+                                                   Object => 'PUBLIC KEY BLOCK');
 	    print "PGP Public-Key:\n$key"
 		if $key =~ /^-----BEGIN PGP PUBLIC KEY BLOCK-----/;
 	}
@@ -1916,17 +1911,6 @@ sub runwipe {
     untie_unlock (%ccc);
 }
 
-sub keyinfo ($;$) {
-    my ($ring, $user) = @_;
-    my ($result, $bits, $id, $fingerprint);
-    $user = "0x" unless defined $user;
-    &runpgp ("-kvc $user $ring", undef, $result);
-    $result || return ();
-    ($bits, $id) = ($result =~ /^pub\s+(\d+)\/(\w+)/m);
-    ($fingerprint) = ($result =~ /^\s+Key fingerprint\s*=\s*(\S.*)$/m);
-    return ($bits, $id, $fingerprint);
-}
-
 sub runexpire {
     my $force = shift;
 
@@ -1956,8 +1940,6 @@ sub runexpire {
 	&runwipe (@expire);
 
 	foreach $nym (@warn) {
-	    my $keyid = (keyinfo ("$NDIR/$nym.pgp"))[1];
-	    $keyid = $keyid ? "0x$keyid" : 'yournym_PGP_key_ID';
 	    open SM, "|$SENDMAIL -f nobody\@$HOSTNAME -t";
 	    print SM <<"EOF";
 From: Alias expiration daemon <nobody\@$HOSTNAME>
@@ -1994,17 +1976,11 @@ here for clarity, do not indent it when you create the file):
  Config:
  From: $nym
 
-Then sign and encrypt this message with this pgp command:
+Then sign and encrypt this message with this GnuPG command:
 
- pgp -seat renew config\@$HOSTNAME -u $keyid
+ gpg -seat renew config\@$HOSTNAME -u $nym\@$HOSTNAME
 
-Here $keyid corresponds to the hex key ID of the PGP key under
-which you created your pseudonym account.  (You can also use the
-descriptive name of your PGP key instead of the hex key ID.  If you
-are unsure what you named your PGP key, you can check the entire
-contents of your keyring with the command pgp -kv.)
-
-The above pgp command will create a file called renew.asc.  You must
+The above gpg command will create a file called renew.asc.  You must
 then mail the contents of that file to <config\@$HOSTNAME>, either
 directly, or, preferably, through some anonymous remailers.  When the
 nym server receives your message, it will send you a confirmation
