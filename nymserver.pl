@@ -1,10 +1,10 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.15 2004/06/09 18:13:31 dybbuk Exp $
+# $Id: nymserver.pl,v 1.16 2004/06/09 18:16:56 dybbuk Exp $
 
 #
 # nymserv email pseudonym server
-# email/finger <source@nym.alias.net> for installation instructions
-# email/finger <licence@nym.alias.net> for a copy of the license
+# email/finger <source@hod.aarg.net> for installation instructions
+# email/finger <licence@hod.aarg.net> for a copy of the license
 # 
 # Copyright 1996-1998 David Mazieres
 #
