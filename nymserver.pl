@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# $Id: nymserver.pl,v 1.5 2002/06/07 22:02:40 dybbuk Exp $
+# $Id: nymserver.pl,v 1.6 2002/06/10 00:37:08 dybbuk Exp $
 
 #
 # nymserv email pseudonym server
@@ -1545,10 +1545,13 @@ EOF
 
     my $err;
     if (!$notmailed && ($flags & $FL_SIGSEND) && $hasbody) {
-        # THIS NEEDS TESTING BADLY
+        # Ok, this is now working.  Clearsigning makes sure that it's
+        # actually readable at the destination, which is ganz toll,
+        # ja?
         my $signed = $PGP->sign(Filename   => "$QPREF.b",
                                 Passphrase => $PASSPHRASE,
                                 Armour     => 1,
+                                Clearsign  => 1,
                                 KeyID      => $NYMKEYID)
           or &fatal(78, $PGP->errstr);
         open(SB, ">$QPREF.b.asc")
