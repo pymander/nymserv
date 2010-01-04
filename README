@@ -197,3 +197,10 @@ Don't set any local_part_suffix as it would probably break alias used
     delivery_date_add
     envelope_to_add
 
+----------------------
+
+An additional guide to setting up Nymserv with some great information
+and useful complaints about the lack of documentation may be found
+here:
+    http://blog.phrog.org/2007/05/12/nymserv-install-notes/
+
